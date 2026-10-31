@@ -59,6 +59,14 @@ back_to_stock() {
   exit 0
 }
 
+# Let the last client's aplay (and ALSA's dmix server, also an aplay) finish
+# closing the sound device first: opening it mid-teardown can wedge this kernel's
+# audio driver until a reboot.
+wait_audio_idle() {
+  i=0
+  while pidof aplay >/dev/null && [ $i -lt 10 ]; do sleep 0.5; i=$((i+1)); done
+}
+
 # copy a file into place atomically (never overwrite a running script or binary in place)
 put() { cp "$1" "$2.new" && chmod "$3" "$2.new" && mv "$2.new" "$2"; }
 
@@ -134,6 +142,7 @@ echo "$(date) starting client from $P" >> $LOG
 fails=0; start=$(date +%s)
 while [ ! -e "$D/disabled" ]; do
   stop_stock   # something relaunched the stock UI (e.g. an alarm)
+  wait_audio_idle
   ran=$(date +%s)
   "$P/static-radio" >> $LOG 2>&1
   now=$(date +%s)

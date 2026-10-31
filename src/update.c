@@ -130,11 +130,8 @@ static void check_once(void) {
     char skip[32] = "", ready[32] = "";
     mkdir(UPD_DIR, 0755);
     read_line(UPD_DIR "/skip", skip, sizeof skip);
-    if (read_line(UPD_DIR "/ready", ready, sizeof ready) == 0 && update_version_newer(ready, STATIC_VERSION)) {
-        set_state(UPD_READY, ready);   /* staged on an earlier run */
-        return;
-    }
-    set_state(UPD_CHECKING, NULL);
+    int have_ready = read_line(UPD_DIR "/ready", ready, sizeof ready) == 0 && update_version_newer(ready, STATIC_VERSION);
+    set_state(have_ready ? UPD_READY : UPD_CHECKING, have_ready ? ready : NULL);
     net_ctx_t *net = net_new(app_file("cacert.pem"));
     if (!net) { set_state(UPD_ERROR, NULL); return; }
     buf_t b = {0};
@@ -147,9 +144,11 @@ static void check_once(void) {
     int64_t size = j ? (int64_t)json_num(j, "size", 0) : 0;
     if (!ver || !url || !sha || strlen(sha) != 64) {
         LOG("update: no usable manifest (HTTP %d)", st);
-        set_state(UPD_ERROR, NULL);
+        if (!have_ready) set_state(UPD_ERROR, NULL);   /* else keep what's staged */
     } else if (!update_version_newer(ver, STATIC_VERSION) || !strcmp(ver, skip)) {
         set_state(UPD_CURRENT, NULL);
+    } else if (have_ready && !strcmp(ver, ready)) {
+        /* already staged */
     } else {
         LOG("update: %s available (running %s); downloading", ver, STATIC_VERSION);
         set_state(UPD_DOWNLOADING, ver);
@@ -192,7 +191,7 @@ static void *run(void *arg) {
         }
         check_requested = 0;
         pthread_mutex_unlock(&mu);
-        if (update_state(NULL, 0) != UPD_READY) check_once();
+        check_once();   /* also replaces a staged build when a newer one is out */
         next = now_ms() + CHECK_EVERY_S * 1000LL;
     }
     return NULL;

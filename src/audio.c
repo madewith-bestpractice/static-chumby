@@ -524,7 +524,20 @@ void audio_service(const sched_t *sc) {
 
 int audio_state(void) { return state; }
 
+/* Close the device gently: this 2.6.28 sound driver can wedge for good (aplay
+ * stuck in snd_pcm_open, no audio until a reboot) if a new aplay opens it while
+ * the last one is still being torn down. So: EOF, let aplay drain and close, and
+ * wait for it; SIGTERM only as a fallback. boot.sh also waits for every aplay
+ * (the dmix server included) to be gone before starting the next client. */
 void audio_shutdown(void) {
     for (int i = 0; i < MAX_STREAMS; i++) stream_kill(&streams[i]);
-    if (aplay_pid > 0) kill(aplay_pid, SIGTERM);
+    if (aplay_fd >= 0) { close(aplay_fd); aplay_fd = -1; }
+    if (aplay_pid <= 0) return;
+    for (int i = 0; i < 30; i++) {                  /* up to 1.5 s to drain and exit */
+        if (waitpid(aplay_pid, NULL, WNOHANG) == aplay_pid) { aplay_pid = -1; return; }
+        usleep(50000);
+    }
+    kill(aplay_pid, SIGTERM);
+    for (int i = 0; i < 20 && waitpid(aplay_pid, NULL, WNOHANG) != aplay_pid; i++) usleep(50000);
+    aplay_pid = -1;
 }

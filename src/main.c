@@ -882,7 +882,13 @@ static void draw(void) {
     else if (mode == MODE_QR) draw_qr_full();
     else draw_player();
     static int last_mode = -1;
-    if (mode != MODE_PLAYER || mode != last_mode || present_full || !sched) ui_present();
+    /* Push the whole screen every 2 s anyway: the stock boot scripts draw
+     * straight onto the framebuffer ("checking network devices") after we've
+     * started, and partial presents would leave that showing under the art. */
+    static int64_t last_full;
+    int64_t tnow = now_ms();
+    if (tnow - last_full > 2000) present_full = 1;
+    if (mode != MODE_PLAYER || mode != last_mode || present_full || !sched) { ui_present(); last_full = tnow; }
     else {   /* only what moves: the station column and the bottom bar */
         ui_present_rect(COL_X, 0, COL_W, H);
         ui_present_rect(0, H - 46, ART_W, 46);
