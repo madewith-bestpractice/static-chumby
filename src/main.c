@@ -869,6 +869,33 @@ static void draw_fave_info(void) {
     draw_detail(f->show[0] ? f->show : f->key, f->title, f->image, f->link, NULL, sched->st[station_under_dial()].bg);
 }
 
+/* The chumby's display composites three planes: fb0 (ours) under the fb1 and
+ * fb2 overlays. The stock boot draws its "checking network devices" screen on
+ * fb1 and makes it opaque; the stock control panel would switch back to fb0
+ * (switch_fb.sh 0), but we've stopped it by then. So make the overlays
+ * transparent ourselves, at start and whenever they come back. */
+static void claim_display(void) {
+    static const char *const knobs[] = { "/proc/driver/chumbyfwfb/key_en", "/proc/driver/chumbyfwfb/alpha",
+                                         "/proc/driver/chumbyfwfb/fb2_alpha" };
+    for (int i = 0; i < 3; i++) {
+        char v[16] = "";
+        FILE *f = fopen(knobs[i], "r");
+        if (!f) continue;
+        if (!fgets(v, sizeof v, f)) v[0] = 0;
+        fclose(f);
+        if (strtol(v, NULL, 0) == 0) continue;
+        /* one raw write, as `echo 0 >` does: stdio would retry forever if the
+         * driver reports 0 bytes taken */
+        int fd = open(knobs[i], O_WRONLY);
+        if (fd >= 0) {
+            ssize_t w = write(fd, "0\n", 2);
+            close(fd);
+            v[strcspn(v, "\n")] = 0;
+            LOG("ui: %s was %s; cleared (%d)", knobs[i], v, (int)w);
+        }
+    }
+}
+
 static void draw(void) {
     if (quit) return;   /* leave request_exit()'s message up */
     if (mode == MODE_SYSTEM) draw_system();
@@ -887,7 +914,7 @@ static void draw(void) {
      * started, and partial presents would leave that showing under the art. */
     static int64_t last_full;
     int64_t tnow = now_ms();
-    if (tnow - last_full > 2000) present_full = 1;
+    if (tnow - last_full > 2000) { present_full = 1; claim_display(); }
     if (mode != MODE_PLAYER || mode != last_mode || present_full || !sched) { ui_present(); last_full = tnow; }
     else {   /* only what moves: the station column and the bottom bar */
         ui_present_rect(COL_X, 0, COL_W, H);
