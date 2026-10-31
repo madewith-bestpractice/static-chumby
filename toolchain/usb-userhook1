@@ -1,0 +1,5 @@
+#!/bin/sh
+# Static radio from a USB stick: the chumby runs this at boot when the stick is
+# plugged in. It starts Static from the stick without changing the chumby; use
+# "Install on this chumby" in Static's system menu to make it permanent.
+"$(dirname "$0")/static/boot.sh" >/dev/null 2>&1 &

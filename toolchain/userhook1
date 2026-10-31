@@ -1,0 +1,4 @@
+#!/bin/sh
+# Static radio: background launcher (see /mnt/storage/static/boot.sh)
+[ -x /psp/rfs1/userhook1.pre-static ] && /psp/rfs1/userhook1.pre-static
+/mnt/storage/static/boot.sh >/dev/null 2>&1 &
