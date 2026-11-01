@@ -5,8 +5,13 @@ plays one shared timeline, so everyone tuned in hears the same moment. This
 turns a 2009 [Chumby One](https://en.wikipedia.org/wiki/Chumby) into a
 dedicated Static radio. The knob is the dial.
 
+Static has nine always-on stations (Learn, Weird, Make, News, Nature, Sleep,
+Work, Unite and one built from a WFMU DJ's archive), filled with independent
+podcasts picked by hand. There's no account and no algorithm: you spin the dial
+and land on whatever is playing, along with everyone else tuned in.
+
 **Static's website: [staticradio.app](https://staticradio.app)**, where you can
-also listen in your browser and get the phone apps.
+also listen in your browser and get the apps for iPhone, iPad, Mac and Android.
 
 ![Static on a Chumby One](docs/screen.png)
 
@@ -20,7 +25,10 @@ publisher over TLS. It tunes in under a second.
 ## Install
 
 You need a Chumby One that's already on Wi-Fi (set it up with the stock chumby
-screens first) and a USB stick formatted FAT32.
+screens first) and a USB stick formatted FAT32. It's built and tested on the
+Chumby One, the 2009 model with the knob; other chumby models haven't been
+tried. Installing is reversible: running from the stick changes nothing, and
+**Turn off Static** in the menu puts the stock chumby back.
 
 1. Download `static-chumby-<version>.zip` from
    [Releases](https://github.com/madewith-bestpractice/static-chumby/releases/latest).
@@ -58,6 +66,14 @@ is a newer version it downloads it in the background, checks its SHA-256, and
 installs it in the 4 a.m. hour, or right away if you tap **Install update** in
 the menu. If a new version keeps crashing, the chumby goes back to the previous
 one by itself. To turn updates off, create `/mnt/storage/static/noupdate`.
+
+## Feedback and bugs
+
+Got a chumby running Static? We'd love to hear about it, and a photo of yours on
+the dial would make our week. If something doesn't work (no sound, a station
+that won't tune, the stock screens coming back), please
+[open an issue](https://github.com/madewith-bestpractice/static-chumby/issues)
+with what you saw and the version from the menu. Pull requests are welcome too.
 
 ## How it works
 
