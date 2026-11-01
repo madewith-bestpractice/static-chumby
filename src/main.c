@@ -693,6 +693,13 @@ static void draw_player(void) {
         /* hero: the phone's riso art, pre-baked server-side (bake_riso_art.yml) */
         if (art) ui_blit_rect(art, 0, 0, ART_W, H);
         else ui_fill(0, 0, ART_W, H, bg);
+        if (!art && st->live && ep) {   /* a local live stream has no cover: its name instead */
+            char nm[128];
+            ui_ascii(ep->show, nm, sizeof nm);
+            ui_text_center_fit(&font_show, ART_W / 2, H / 2 - 4, nm, ART_W - 24, st->ink);
+            ui_ascii(ep->title, nm, sizeof nm);
+            ui_text_center_fit(&font_small, ART_W / 2, H / 2 + 20, nm, ART_W - 24, ui_mix(bg, PAPER, 170));
+        }
         pol_clock = polarity_for(0, 40);           /* time + volume */
         pol_icons = polarity_for(H - 72, 72);      /* icon rows */
         shade(0, TOP_BAR, 1, &pol_clock);
@@ -1050,7 +1057,7 @@ int main(int argc, char **argv) {
             tune(station_under_dial());
         if (sched && commit_at && t >= commit_at && tuned >= 0) {
             commit_at = 0;
-            resolver_set_presence(sched->st[tuned].id);
+            resolver_set_presence(sched->st[tuned].live ? "" : sched->st[tuned].id);   /* local streams aren't Static stations */
             save_last_station(sched->st[tuned].id);
         }
         if (sched && t - last_wants > 1000) {

@@ -20,6 +20,7 @@ typedef struct {
     int64_t sum_ms;      /* sum of episode durations */
     int n;
     ep_t *eps;           /* only episodes with dur > 0, in loop order */
+    int live;            /* a local live stream (local-stations.json): no timeline, one endless "episode" */
 } station_t;
 
 #define MAX_STATIONS 16
@@ -31,7 +32,17 @@ typedef struct {
     station_t st[MAX_STATIONS];
     char *text;          /* owns all strings */
     jpool *pool;
+    char *local_text;    /* local-stations.json: owns the live stations' strings */
+    jpool *local_pool;
 } sched_t;
+
+/* Optional, per device: STATIC_DIR/local-stations.json, a JSON array of live
+ * streams added to the dial (never part of the shared schedule):
+ *   [{"id": "...", "tag": "DIAL LABEL", "name": "Station name",
+ *     "about": "One line", "url": "https://.../stream.mp3",
+ *     "link": "https://station.site", "ink": "#RRGGBB", "after": "station_id"}]
+ * "after" places it after that station (default: the end of the dial). */
+#define LOCAL_STATIONS_FILE STATIC_DIR "/local-stations.json"
 
 /* Takes ownership of `text` (malloc'd). NULL on failure. */
 sched_t *sched_parse(char *text);

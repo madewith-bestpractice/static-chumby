@@ -339,7 +339,7 @@ static void nb_service(const sched_t *sc) {
         int st = nb[i].st, wanted = st == tuned;   /* the tuned one: the launch is about to take it */
         for (int k = 0; k < NB_N; k++) wanted |= nb_want[k] == st;
         int slot = -1; int64_t off = 0;
-        int live = st >= 0 && st < sc->n && !sched_live(sc, st, now, &slot, &off) &&
+        int live = st >= 0 && st < sc->n && !sc->st[st].live && !sched_live(sc, st, now, &slot, &off) &&
                    slot == nb[i].slot && !strcmp(sc->st[st].eps[slot].url, nb[i].url) &&
                    (int64_t)sc->st[st].eps[slot].dur_s * 1000 - off > 30000;
         if (!wanted || !live) { prebuf_cancel(nb[i].p); nb[i].p = NULL; continue; }
@@ -350,7 +350,7 @@ static void nb_service(const sched_t *sc) {
     if (state != AUDIO_PLAYING) return;
     for (int k = 0; k < NB_N; k++) {
         int st = nb_want[k];
-        if (st < 0 || st >= sc->n || st == tuned) continue;
+        if (st < 0 || st >= sc->n || st == tuned || sc->st[st].live) continue;
         int have = 0, free_i = -1;
         for (int i = 0; i < NB_N; i++) {
             if (nb[i].p && nb[i].st == st) have = 1;
@@ -458,6 +458,38 @@ static int produce_station(const sched_t *sc, int sti, int16_t *out, int primary
     if (sched_live(sc, sti, t, &slot, &off)) return 0;
     const station_t *st = &sc->st[sti];
     const ep_t *ep = &st->eps[slot];
+
+    if (st->live) {   /* a local live stream: no timeline to follow, play what arrives */
+        stream_t *s = find_stream(sti, slot, ep->url);
+        if (!s) {
+            int rs = resolver_status(ep->url);
+            int64_t since = now_ms() - tuned_at;
+            int wait = (rs == 0 && since < 10000) || (rs == 4 && since < 20000);
+            if (primary && net_ready && !wait && now_ms() - fail_at[sti] > 3000 && !launch(sti, slot, ep->url, 0))
+                fail_at[sti] = now_ms();
+            state = AUDIO_TUNING;
+            return 0;
+        }
+        int got = take(s, out, CHUNK_FRAMES);
+        if (got == 0) {
+            if (s->eof && primary) {           /* the stream dropped: reconnect */
+                LOG("audio: live stream st=%d ended, reconnecting", sti);
+                stream_kill(s);
+                fail_at[sti] = now_ms();
+            }
+            state = AUDIO_TUNING;
+            return 0;
+        }
+        state = AUDIO_PLAYING;
+        int32_t g = muted ? 0 : master_q15;
+        for (int i = 0; i < got; i++) {
+            int32_t gi = g;
+            if (s->fade < FADE_FRAMES) { gi = (int32_t)((int64_t)g * s->fade / FADE_FRAMES); s->fade++; }
+            out[2 * i] = (int16_t)((out[2 * i] * gi) >> 15);
+            out[2 * i + 1] = (int16_t)((out[2 * i + 1] * gi) >> 15);
+        }
+        return got;
+    }
 
     /* pre-launch the next slot so it starts exactly at its boundary */
     int64_t remaining = (int64_t)ep->dur_s * 1000 + GAP_MS - off;

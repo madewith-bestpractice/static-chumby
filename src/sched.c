@@ -49,6 +49,54 @@ static int cmp_sort(const void *a, const void *b) {
     return x[0] - y[0];
 }
 
+/* Live streams from this device's own local-stations.json (see sched.h). */
+static void add_local_stations(sched_t *s) {
+    FILE *f = fopen(LOCAL_STATIONS_FILE, "r");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *text = len > 0 && len < 65536 ? malloc((size_t)len + 1) : NULL;
+    if (text && fread(text, 1, (size_t)len, f) != (size_t)len) { free(text); text = NULL; }
+    fclose(f);
+    if (!text) return;
+    text[len] = 0;
+    jnode *root = json_parse(text, &s->local_pool);
+    if (!root || root->t != J_ARR) { LOG("sched: local-stations.json isn't a JSON array"); free(text); json_free(s->local_pool); s->local_pool = NULL; return; }
+    s->local_text = text;
+    for (const jnode *c = root->child; c && s->n < MAX_STATIONS; c = c->next) {
+        const char *url = json_str(c, "url", NULL), *tag = json_str(c, "tag", NULL);
+        if (!url || !*url || !tag || !*tag) continue;
+        station_t st = {0};
+        snprintf(st.id, sizeof st.id, "%s", json_str(c, "id", tag));
+        snprintf(st.tag, sizeof st.tag, "%s", tag);
+        st.ink = rgb565(0xF5, 0xF3, 0xEF);
+        hex_color(json_str(c, "ink", NULL), &st.ink);
+        st.bg = darken(st.ink, 1, 7);
+        st.live = 1;
+        st.eps = calloc(1, sizeof(ep_t));
+        if (!st.eps) break;
+        ep_t *ep = &st.eps[0];
+        ep->url = url;
+        ep->show = json_str(c, "name", tag);
+        ep->title = json_str(c, "about", "");
+        ep->feed = url;
+        ep->image = "";
+        ep->link = json_str(c, "link", "");
+        ep->dur_s = 86400 - 2;            /* one endless slot: the timeline maths never ends it */
+        st.n = 1;
+        st.loop_s = 86400;
+        st.sum_ms = (int64_t)ep->dur_s * 1000;
+        int at = s->n;                    /* default: the end of the dial */
+        const char *after = json_str(c, "after", NULL);
+        for (int i = 0; after && i < s->n; i++) if (!strcmp(s->st[i].id, after)) at = i + 1;
+        memmove(&s->st[at + 1], &s->st[at], sizeof s->st[0] * (size_t)(s->n - at));
+        s->st[at] = st;
+        s->n++;
+        LOG("sched: local live station %s at dial position %d", st.id, at);
+    }
+}
+
 sched_t *sched_parse(char *text) {
     sched_t *s = calloc(1, sizeof *s);
     s->text = text;
@@ -123,6 +171,7 @@ sched_t *sched_parse(char *text) {
         s->n++;
     }
     if (s->n == 0) { LOG("sched: no playable stations"); sched_free(s); return NULL; }
+    add_local_stations(s);
     return s;
 }
 
@@ -131,6 +180,8 @@ void sched_free(sched_t *s) {
     for (int i = 0; i < s->n; i++) free(s->st[i].eps);
     json_free(s->pool);
     free(s->text);
+    json_free(s->local_pool);
+    free(s->local_text);
     free(s);
 }
 
