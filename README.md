@@ -5,7 +5,12 @@ plays one shared timeline, so everyone tuned in hears the same moment. This
 turns a 2009 [Chumby One](https://en.wikipedia.org/wiki/Chumby) into a
 dedicated Static radio. The knob is the dial.
 
+**Static's website: [staticradio.app](https://staticradio.app)**, where you can
+also listen in your browser and get the phone apps.
+
 ![Static on a Chumby One](docs/screen.png)
+
+Video: [the knob tuning stations](https://youtu.be/yQpOvSauJuE) (26 s).
 
 It is a native client written for the hardware: an i.MX233 (a 454 MHz ARM9 with
 no FPU), 60 MB of RAM, a 320×240 touch screen and Linux 2.6.28. It decodes MP3
