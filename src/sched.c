@@ -86,6 +86,7 @@ sched_t *sched_parse(char *text) {
         }
         size_t tl = strlen(st->tag);   /* "SHEILA B" -> "SHEILA" (the watches do the same) */
         if (tl > 2 && st->tag[tl - 2] == ' ' && (st->tag[tl - 1] == 'A' || st->tag[tl - 1] == 'B')) st->tag[tl - 2] = 0;
+        if (!strcmp(st->tag, "WEIRD")) strcpy(st->tag, "WEiRD");   /* the phone's stylized lowercase i (main.dart) */
 
         const jnode *pal = json_get(c, "palette");
         st->ink = rgb565(0xF5, 0xF3, 0xEF);
