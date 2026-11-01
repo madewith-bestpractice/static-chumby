@@ -15,6 +15,8 @@
 #include "sched.h"
 #include "splash.h"
 #include "update.h"
+#include "net.h"
+#include <sys/stat.h>
 #include "third_party/qrcodegen.h"
 #include "ui.h"
 #include <fcntl.h>
@@ -49,16 +51,20 @@
 #define ART_W 240
 #define COL_X 240                     /* station column */
 #define COL_W (W - COL_X)
-#define ICON_Y 8                      /* icon row over the top of the art */
+/* Over the art (Brendan, 2026-11-01): the time + volume along the top; the
+ * icons in two rows along the bottom (face + count, heart, info; the faves
+ * list under info), joined by the dotted trail as on the phone. */
+#define ICON_Y (H - 66)               /* first icon row: 26 px icons, rows 32 apart, 8 px margin */
 /* Top-right constellation, like the phone: heart, info dot, and the faves list
  * under the info dot (rotated 180, as on the phone) with the dotted trail from
  * the heart down and across into it while faves exist. */
 #define ICON_HEART_X 170
 #define ICON_INFO_X 206
 #define ICON_LIST_X 206
-#define ICON_LIST_Y 40
+#define ICON_LIST_Y (H - 34)
 #define TRAIL_MS 700
-#define VOL_Y 206                     /* bottom bar: time, then volume to its right */
+#define CLOCK_BASE 24                 /* top bar: time, then volume to its right (text baseline) */
+#define TOP_BAR 46                    /* rows of the top bar (shade + what changes per frame) */
 #define LABEL_ROW 27                  /* station column row height */
 
 /* staticradio.app palette (assets/site.css) */
@@ -454,11 +460,11 @@ static void on_tap(int x, int y) {
         last_knob_ms = t - SETTLE_MS;
         return;
     }
-    if (y >= VOL_Y - 8 && x < ART_W) {
+    if (y < TOP_BAR - 6 && x < ART_W) {
         vol_layout_t v = vol_layout();
         if (x >= v.icon - 14 && x < v.icon + 34) { muted = !muted; audio_set_muted(muted); return; }   /* mute */
     }
-    if (y < ICON_LIST_Y + 34 && x >= ICON_HEART_X - 8) {
+    if (y >= ICON_Y - 8 && x >= ICON_HEART_X - 8 && x < ART_W) {
         if (x < ICON_INFO_X - 4) {                              /* heart */
             if (y < ICON_Y + 34) {
                 const ep_t *ep = live_ep(station_under_dial(), NULL);
@@ -538,7 +544,7 @@ static const icon_t *daily_face(void) {
  * ink polarity from the cover the same way): light covers get dark ink on a
  * soft light wash, dark covers light ink on a dark wash. */
 typedef struct { uint16_t ink, quiet, halo, wash; int wash_max; } polarity_t;
-static polarity_t pol_top, pol_bottom;
+static polarity_t pol_icons, pol_clock;
 
 static polarity_t polarity_for(int y0, int h) {
     long sum = 0, n = 0;
@@ -561,12 +567,12 @@ static void shade(int y0, int h, int top_dark, const polarity_t *p) {
 }
 
 static void icon_on_art(const icon_t *ic, int x, int y, uint16_t c) {
-    ui_icon(ic, x + 1, y + 1, pol_top.halo);
+    ui_icon(ic, x + 1, y + 1, pol_icons.halo);
     ui_icon(ic, x, y, c);
 }
 
 static void text_on_art(const font_t *f, int x, int y, const char *s, uint16_t c) {
-    const polarity_t *p = y > H / 2 ? &pol_bottom : &pol_top;
+    const polarity_t *p = y > H / 2 ? &pol_icons : &pol_clock;
     ui_text(f, x + 1, y + 1, s, p->halo);
     ui_text(f, x, y, s, c);
 }
@@ -623,8 +629,8 @@ static void draw_trail(double frac) {
         while (next <= acc + seg && next <= limit) {
             double t = seg > 0 ? (next - acc) / seg : 0;
             int x = (int)lround(px[i-1] + (px[i] - px[i-1]) * t), y = (int)lround(py[i-1] + (py[i] - py[i-1]) * t);
-            ui_fill_alpha(x, y, 3, 3, pol_top.halo, 120);       /* halo */
-            ui_fill(x - 1, y, 3, 1, pol_top.ink); ui_fill(x, y - 1, 1, 3, pol_top.ink);   /* round-ish dot */
+            ui_fill_alpha(x, y, 3, 3, pol_icons.halo, 120);       /* halo */
+            ui_fill(x - 1, y, 3, 1, pol_icons.ink); ui_fill(x, y - 1, 1, 3, pol_icons.ink);   /* round-ish dot */
             next += 4;
         }
         acc += seg;
@@ -643,6 +649,8 @@ static int hero_fade_was;
 #define HERO_FADE_MS 200                /* crossfade between stations' art */
 static uint32_t hero_key;
 static int hero_valid, present_full = 1;
+static int hero_blit_all = 1;           /* another screen or an overlay covered the art */
+#define HERO_STRIP TOP_BAR              /* rows of the art that change per frame (time, volume, TUNING) */
 
 
 static void draw_player(void) {
@@ -680,26 +688,31 @@ static void draw_player(void) {
         /* hero: the phone's riso art, pre-baked server-side (bake_riso_art.yml) */
         if (art) ui_blit_rect(art, 0, 0, ART_W, H);
         else ui_fill(0, 0, ART_W, H, bg);
-        pol_top = polarity_for(0, 72);          /* icon rows */
-        pol_bottom = polarity_for(H - 40, 40);  /* time + volume */
-        shade(0, 46, 1, &pol_top);
-        shade(H - 46, 46, 0, &pol_bottom);
+        pol_clock = polarity_for(0, 40);           /* time + volume */
+        pol_icons = polarity_for(H - 72, 72);      /* icon rows */
+        shade(0, TOP_BAR, 1, &pol_clock);
+        shade(H - 74, 74, 0, &pol_icons);
         /* icons over the art: face + listeners | heart, faves list, info */
-        icon_on_art(daily_face(), 8, ICON_Y, pol_top.ink);
+        icon_on_art(daily_face(), 8, ICON_Y, pol_icons.ink);
         if (c > 0) {
             if (c < 1000) snprintf(buf, sizeof buf, "%d", c);
             else if (c < 10000) snprintf(buf, sizeof buf, "%.1fk", c / 1000.0);
             else snprintf(buf, sizeof buf, "%dk", (c + 500) / 1000);
-            text_on_art(&font_show, 40, ICON_Y + 20, buf, pol_top.ink);
+            text_on_art(&font_show, 40, ICON_Y + 20, buf, pol_icons.ink);
         }
         draw_trail(trail);
-        icon_on_art(faved ? &icon_heart_fill : &icon_heart_line, ICON_HEART_X, ICON_Y, pol_top.ink);   /* same ink as the others */
-        icon_on_art(&icon_info, ICON_INFO_X, ICON_Y, pol_top.ink);
-        ui_icon_rot180(&icon_faves_list, ICON_LIST_X + 1, ICON_LIST_Y + 1, pol_top.halo);
-        ui_icon_rot180(&icon_faves_list, ICON_LIST_X, ICON_LIST_Y, pol_top.ink);
+        icon_on_art(faved ? &icon_heart_fill : &icon_heart_line, ICON_HEART_X, ICON_Y, pol_icons.ink);   /* same ink as the others */
+        icon_on_art(&icon_info, ICON_INFO_X, ICON_Y, pol_icons.ink);
+        ui_icon_rot180(&icon_faves_list, ICON_LIST_X + 1, ICON_LIST_Y + 1, pol_icons.halo);
+        ui_icon_rot180(&icon_faves_list, ICON_LIST_X, ICON_LIST_Y, pol_icons.ink);
         ui_read_rect(hero_base, 0, 0, ART_W, H);   /* the finished panel */
         hero_key = key; hero_valid = 1; present_full = 1;
-    } else ui_blit_rect(hero_base, 0, 0, ART_W, H);
+    } else if (hero_blit_all || fading || hero_fade_was || bend_down || vol_overlay_was ||
+               now_ms() - volume_shown_ms < VOL_OVERLAY_MS)
+        ui_blit_rect(hero_base, 0, 0, ART_W, H);
+    else   /* only the top strip is redrawn each frame; the rest of the back buffer is still the art */
+        ui_blit_rect(hero_base, 0, 0, ART_W, HERO_STRIP);
+    hero_blit_all = 0;
     if (fading) {
         ui_blend_rect(hero_from, 0, 0, ART_W, H, 255 - (int)(fs * 255 / HERO_FADE_MS));
         ui_read_rect(hero_disp, 0, 0, ART_W, H);   /* for a fade interrupted by the next station */
@@ -708,20 +721,20 @@ static void draw_player(void) {
     hero_fade_was = fading;
 
 
-    /* bottom of the art: time (US Central), volume to its right */
+    /* top of the art: the time (the chumby's own zone), volume to its right */
     char clock[16];
     fmt_clock(clock, sizeof clock);
-    int base = H - 12;
+    int base = CLOCK_BASE;
     vol_layout_t v = vol_layout();
     /* quiet ink, but with the same 1 px halo as the icons so busy covers can't swallow it */
-    uint16_t halo = pol_bottom.halo;
+    uint16_t halo = pol_clock.halo;
     ui_text(&font_clock, 11, base + 1, clock, halo);
-    ui_text(&font_clock, 10, base, clock, pol_bottom.quiet);
+    ui_text(&font_clock, 10, base, clock, pol_clock.quiet);
     uint16_t teal = halo == 0xFFFF ? 0x0450 /* #088A80 on light art */ : SITE_TEAL;
     /* glyphs sized to the clock and centered on its digits */
     const icon_t *vg = muted ? &icon_volume_off_sm : &icon_volume_sm;
     ui_icon(vg, v.icon + 1, base - 14, halo);
-    ui_icon(vg, v.icon, base - 15, muted ? teal : pol_bottom.quiet);
+    ui_icon(vg, v.icon, base - 15, muted ? teal : pol_clock.quiet);
     if (bend_down || now_ms() - volume_shown_ms < VOL_OVERLAY_MS) {   /* hold top button + turn */
         int ox = 30, oy = 92, ow = ART_W - 60, oh = 56;
         ui_fill_alpha(ox, oy, ow, oh, SITE_INK, 225);
@@ -747,7 +760,7 @@ static void draw_player(void) {
         int dots = (int)(now / 350 % 4);
         snprintf(t, sizeof t, "%s%.*s", word, offline ? 0 : dots, "...");
         int x = ART_W - 12 - ui_text_width(&font_small, offline ? "NO NETWORK" : "TUNING...");   /* fixed left edge: no jitter */
-        text_on_art(&font_small, x, base, t, ui_mix(pol_bottom.halo, teal, a));
+        text_on_art(&font_small, x, base, t, ui_mix(pol_clock.halo, teal, a));
     }
     draw_column();
 }
@@ -898,6 +911,7 @@ static void claim_display(void) {
 
 static void draw(void) {
     if (quit) return;   /* leave request_exit()'s message up */
+    if (mode != MODE_PLAYER || !sched) hero_blit_all = 1;   /* the art panel gets painted over */
     if (mode == MODE_SYSTEM) draw_system();
     else if (!sched) {
         ui_blit_rect(splash_565, 0, 0, W, H);   /* the phone's launch screen */
@@ -916,9 +930,9 @@ static void draw(void) {
     int64_t tnow = now_ms();
     if (tnow - last_full > 2000) { present_full = 1; claim_display(); }
     if (mode != MODE_PLAYER || mode != last_mode || present_full || !sched) { ui_present(); last_full = tnow; }
-    else {   /* only what moves: the station column and the bottom bar */
+    else {   /* only what moves: the station column and the top bar */
         ui_present_rect(COL_X, 0, COL_W, H);
-        ui_present_rect(0, H - 46, ART_W, 46);
+        ui_present_rect(0, 0, ART_W, TOP_BAR);
     }
     present_full = 0;
     last_mode = mode;
@@ -978,6 +992,7 @@ int main(int argc, char **argv) {
     FILE *pi = fopen("/sys/module/stmp3xxx_rotdec/parameters/poll_interval", "w");   /* 50 ms -> 10 ms */
     if (pi) { fputs("10", pi); fclose(pi); }
     audio_init();
+    net_sessions_load(STATIC_DIR "/tls-sessions");   /* resume, don't redo, the boot handshakes */
     resolver_start();
     update_start();
     pthread_t wd;
@@ -1058,10 +1073,19 @@ int main(int argc, char **argv) {
                 request_exit("update", "Installing the update...");
         }
         if (mode == MODE_SYSTEM) animating = 1;   /* live update status */
+        static int64_t last_sess_save = 0, last_log_check = 0;
+        if (!last_sess_save) last_sess_save = t;
+        if (t - last_sess_save > 30 * 60000) { net_sessions_save(STATIC_DIR "/tls-sessions"); last_sess_save = t; }
+        if (t - last_log_check > 60000) {   /* the log lives in /tmp, i.e. RAM: keep it under 512 KB */
+            last_log_check = t;
+            struct stat lst;
+            if (fstat(2, &lst) == 0 && S_ISREG(lst.st_mode) && lst.st_size > 512 * 1024 && ftruncate(2, 0) == 0)
+                LOG("log trimmed (was %lld KB)", (long long)lst.st_size / 1024);
+        }
         if (t - trail_changed_ms < TRAIL_MS + 50 || t - hero_fade_ms < HERO_FADE_MS + 50) animating = 1;
-        if (sched && mode == MODE_PLAYER && tuning_now()) animating = 1;   /* breathing "TUNING..." */
+        int slow_anim = sched && mode == MODE_PLAYER && tuning_now();   /* breathing "TUNING...": 8 fps is plenty */
         if (bend_down || t - volume_shown_ms < VOL_OVERLAY_MS + 100) animating = 1;   /* volume overlay */
-        if (input || t - last_draw > (animating ? 25 : 500)) {
+        if (input || t - last_draw > (animating ? 25 : slow_anim ? 125 : 500)) {
             struct timeval a, b;
             gettimeofday(&a, NULL);
             draw(); last_draw = t;
@@ -1077,6 +1101,7 @@ int main(int argc, char **argv) {
         }
     }
     LOG("static-radio exiting");
+    net_sessions_save(STATIC_DIR "/tls-sessions");
     audio_shutdown();
     return 0;
 }

@@ -11,6 +11,7 @@
 #include "fetch.h"
 #include "mp3probe.h"
 #include "decode.h"
+#include "pcmout.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -23,7 +24,10 @@
 #define FRAME 4                        /* s16 stereo */
 #define CHUNK_FRAMES 1024              /* 4096 bytes == PIPE_BUF: atomic pipe writes */
 #define RING_BYTES (RATE * FRAME * 3)  /* 3 s of decoded audio per stream */
-#define OUT_LATENCY_MS 850             /* pipe (64 KB ≈ 370 ms) + aplay's buffer */
+/* From mixing a chunk to hearing it: the pipe (64 KB ≈ 371 ms) plus the device
+ * buffer (16384 frames = 371 ms) on the direct path; aplay buffers a bit more. */
+static int out_latency_ms = 850;
+#define OUT_LATENCY_MS out_latency_ms
 #define SYNC_SLOP_MS 120
 #define PRELAUNCH_MS 8000              /* start the next episode's decoder this early */
 #define FADE_FRAMES (RATE / 5)         /* 200 ms fade-in */
@@ -51,7 +55,8 @@ typedef struct {
 
 static stream_t streams[MAX_STREAMS];
 static pid_t aplay_pid = -1;
-static int aplay_fd = -1;
+static int aplay_fd = -1;             /* the mixer's output pipe (to aplay or the pcmout thread) */
+static int out_direct;                 /* pcmout thread instead of aplay */
 static int tuned = -1, muted;
 /* Station change: the old station keeps playing until the new one has audio,
  * then they crossfade (instead of seconds of silence while tuning). */
@@ -113,6 +118,18 @@ static void child_setup(void) {
 static void spawn_aplay(void) {
     int p[2];
     if (pipe(p)) return;
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    if (pcmout_start(p[0]) == 0) {   /* direct to the device: no aplay, no dmix */
+        out_direct = 1;
+        out_latency_ms = 750;
+        aplay_pid = -1;
+        aplay_fd = p[1];
+        set_nonblock(aplay_fd);
+        have_pending = 0;
+        return;
+    }
+    out_direct = 0;
+    out_latency_ms = 850;
     pid_t pid = fork();
     if (pid == 0) {
         child_setup();
@@ -400,6 +417,16 @@ static int produce_station(const sched_t *sc, int sti, int16_t *out, int primary
         launch(sti, nslot, st->eps[nslot].url, 0);
 
     stream_t *s = find_stream(sti, slot, ep->url);
+    /* ffmpeg was the fallback, but the native path became ready before it made a
+     * sound (it takes 15-25 s): switch. Once per URL, so a native start that
+     * fails (and falls back to ffmpeg again) can't loop. */
+    static char handed_over[2048];
+    if (s && primary && s->pid > 0 && !s->first_pcm_ms && resolver_status(ep->url) == 1 && strcmp(handed_over, ep->url)) {
+        snprintf(handed_over, sizeof handed_over, "%s", ep->url);
+        LOG("audio: native path ready before ffmpeg made a sound; switching st=%d slot=%d", sti, slot);
+        stream_kill(s);
+        s = NULL;
+    }
     if (!s) {
         int64_t audio_end = ep->bulletin && ep->dur_s * 1000 > BULLETIN_CAP_MS ? BULLETIN_CAP_MS : (int64_t)ep->dur_s * 1000;
         char tmp[2048]; mp3info_t mi;
@@ -411,7 +438,8 @@ static int produce_station(const sched_t *sc, int sti, int16_t *out, int primary
          * resolver ~10 s rather than dropping to ffmpeg's 15-20 s path; the old
          * station keeps playing through the crossfade meanwhile */
         int rs = resolver_status(ep->url);
-        int wait = rs == 0 && now_ms() - tuned_at < 10000;
+        int64_t since = now_ms() - tuned_at;
+        int wait = (rs == 0 && since < 10000) || (rs == 4 && since < 20000);   /* 4: mid-resolve, nearly there */
         if (primary && net_ready && !wait && off + lead < audio_end - 1500 && now_ms() - fail_at[sti] > 3000)
             launch(sti, slot, ep->url, off + lead);
         if (state != AUDIO_GAP) state = AUDIO_TUNING;
@@ -479,6 +507,11 @@ void audio_service(const sched_t *sc) {
         for (int i = 0; i < MAX_STREAMS; i++) if (streams[i].pid == pid) streams[i].pid = -1;
     }
 
+    if (out_direct && pcmout_done() && aplay_fd >= 0) {   /* the output thread hit a device error */
+        LOG("audio: direct output stopped; restarting it");
+        close(aplay_fd); aplay_fd = -1;
+        spawn_aplay();
+    }
     for (int i = 0; i < MAX_STREAMS; i++) if (streams[i].used) pump(&streams[i]);
     static int64_t nb_last;
     if (now_ms() - nb_last > 1000) { nb_service(sc); nb_last = now_ms(); }
@@ -532,6 +565,10 @@ int audio_state(void) { return state; }
 void audio_shutdown(void) {
     for (int i = 0; i < MAX_STREAMS; i++) stream_kill(&streams[i]);
     if (aplay_fd >= 0) { close(aplay_fd); aplay_fd = -1; }
+    if (out_direct) {   /* the thread drains (<= 371 ms) and closes the device */
+        for (int i = 0; i < 30 && !pcmout_done(); i++) usleep(50000);
+        return;
+    }
     if (aplay_pid <= 0) return;
     for (int i = 0; i < 30; i++) {                  /* up to 1.5 s to drain and exit */
         if (waitpid(aplay_pid, NULL, WNOHANG) == aplay_pid) { aplay_pid = -1; return; }

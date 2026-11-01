@@ -48,6 +48,7 @@ typedef struct { char *orig, *final; int64_t at; int failed; probe_t probe; } en
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static entry_t cache[CACHE_N];
 static char *want[WANT_N];
+static char *active;   /* the URL being resolved right now (under mu) */
 static int nwant;
 static sched_t *pending;
 static char last_generated[48];
@@ -196,6 +197,7 @@ int resolver_status(const char *url) {
     entry_t *e = find(url);
     if (e && e->failed) st = 3;
     else if (e && e->final && now_ms() - e->at < FRESH_MS) st = e->probe.fmt != FMT_UNKNOWN ? 1 : 2;
+    else if (active && !strcmp(active, url)) st = 4;   /* being resolved right now */
     pthread_mutex_unlock(&mu);
     return st;
 }
@@ -316,6 +318,21 @@ static int moov_ok(const char *path, probe_t *pr) {
     return ok;
 }
 
+/* A long probe (a multi-MB moov takes 15 s+) gives way when the tuned
+ * station's episode needs resolving: it's abandoned, not marked failed, and
+ * comes round again later. Resolver thread only. */
+static int probe_yielded;
+static int yield_to_tuned(void) {
+    int y = 0;
+    pthread_mutex_lock(&mu);
+    if (nwant && active && strcmp(want[0], active)) {
+        entry_t *e = find(want[0]);
+        y = !e || (e->failed && now_ms() - e->at > 5000);
+    }
+    pthread_mutex_unlock(&mu);
+    return y;
+}
+
 /* Walk the top-level boxes to the moov (at the start, or after mdat) and cache it. */
 static int probe_mp4(net_ctx_t *net, const char *final, const char *path) {
     rd_t r = { net, final, NULL, 0, 0 };
@@ -335,7 +352,14 @@ static int probe_mp4(net_ctx_t *net, const char *final, const char *path) {
             if (!m) break;
             size_t hl = (size_t)(r.pos - start);
             memcpy(m, hdr, hl);
-            if (!rd_read(&r, m + hl, (size_t)size - hl)) {
+            int got_all = 1;
+            for (size_t at = hl; at < (size_t)size; ) {   /* in 64 KB steps, so it can give way */
+                size_t k = (size_t)size - at > 65536 ? 65536 : (size_t)size - at;
+                if (rd_read(&r, m + at, k)) { got_all = 0; break; }
+                at += k;
+                if (at < (size_t)size && yield_to_tuned()) { probe_yielded = 1; got_all = 0; break; }
+            }
+            if (got_all) {
                 mp4idx_t idx;
                 if (mp4_parse_moov(m, (size_t)size, &idx) == 0) {   /* an AAC track we can play */
                     mp4_free(&idx);
@@ -360,7 +384,8 @@ out:
     return ok;
 }
 
-static void probe_any(net_ctx_t *net, const char *orig, const char *url, probe_t *pr) {
+/* url: the resolved URL (a 2048-byte buffer); updated if the read redirected. */
+static void probe_any(net_ctx_t *net, const char *orig, char *url, probe_t *pr) {
     memset(pr, 0, sizeof *pr);
     char path[256];
     moov_path_for(orig, path, sizeof path);
@@ -369,6 +394,10 @@ static void probe_any(net_ctx_t *net, const char *orig, const char *url, probe_t
     int st; int64_t total;
     net_stream_t *s = http_stream_open(net, url, 0, -1, &st, &total);
     if (!s) return;
+    if (strcmp(http_stream_url(s), url)) {   /* the real read bounced: remember where it lives */
+        LOG("resolve: reads redirect to %.80s", http_stream_url(s));
+        snprintf(url, 2048, "%s", http_stream_url(s));
+    }
     static uint8_t buf[16384];
     size_t len = 0;
     int r;
@@ -478,6 +507,48 @@ static void fetch_counts(net_ctx_t *net) {
     buf_free(&b);
 }
 
+/* The first of want[0..limit) that is missing or about to go stale. The tuned
+ * station (want[0]) retries a failure after 5 s (Wi-Fi may just be coming up);
+ * the rest after a minute. Caller frees. */
+static char *next_want(int limit) {
+    char *todo = NULL;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < nwant && i < limit && !todo; i++) {
+        entry_t *e = find(want[i]);
+        if (!e || (!e->failed && now_ms() - e->at > FRESH_MS - 120000) ||
+            (e->failed && now_ms() - e->at > (i == 0 ? 5000 : 60000)))
+            todo = strdup(want[i]);
+    }
+    pthread_mutex_unlock(&mu);
+    return todo;
+}
+
+static void resolve_one(net_ctx_t *net, char *todo) {
+    pthread_mutex_lock(&mu);
+    active = todo;
+    pthread_mutex_unlock(&mu);
+    probe_yielded = 0;
+    char final[2048];
+    int64_t t0 = now_ms();
+    if (http_resolve(net, todo, final, sizeof final) == 0) {
+        probe_t pr;
+        int64_t t1 = now_ms();
+        probe_any(net, todo, final, &pr);
+        if (probe_yielded) LOG("resolve: gave way to the tuned station; will retry %.60s", final);
+        else store(todo, final, &pr);
+        static const char *fmts[] = {"unknown", "mp3", "mp4/aac", "wav"};
+        LOG("resolve: %lld ms (+probe %lld ms: %s%s) -> %.60s",
+            (long long)(t1 - t0), (long long)(now_ms() - t1), fmts[pr.fmt],
+            pr.fmt == FMT_MP3 && pr.mp3.has_toc ? " VBR+toc" : "", final);
+    } else {
+        store(todo, NULL, NULL);
+    }
+    pthread_mutex_lock(&mu);
+    active = NULL;
+    pthread_mutex_unlock(&mu);
+    free(todo);
+}
+
 static void *run(void *arg) {
     (void)arg;
     net_ctx_t *net = net_new(app_file("cacert.pem"));
@@ -493,8 +564,22 @@ static void *run(void *arg) {
     device_id[14] = 0;
     int64_t next_schedule = 0, next_beat = 0, next_counts = 0;
     load_cached_schedule();
+    /* Priorities (each handshake is 0.1-3 s on this CPU, so order IS latency):
+     *  1. the tuned station's episode: audio needs it, and at boot the cached
+     *     schedule already names it
+     *  2. the live schedule (audio also waits for it)
+     *  3. art for the dial
+     *  4. presence + listener counts
+     *  5. everything else wanted: the next episode, the neighbors */
     for (;;) {
-        int64_t now = now_ms();
+        char *todo = next_want(1);
+        if (todo) { resolve_one(net, todo); continue; }
+        if (now_ms() >= next_schedule) {
+            fetch_schedule(net);
+            next_schedule = now_ms() + (have_live_schedule ? SCHEDULE_EVERY_MS : 3000);   /* Wi-Fi may not be up yet */
+            continue;
+        }
+        if (fetch_one_art(net)) continue;
         /* presence: leave the old station, join the new one, heartbeat */
         char pw[24];
         pthread_mutex_lock(&mu);
@@ -514,37 +599,9 @@ static void *run(void *arg) {
             fetch_counts(net);
             next_counts = now_ms() + HEARTBEAT_MS;
         }
-        if (fetch_one_art(net)) continue;   /* art for the dial comes before redirect work */
-        if (now >= next_schedule) {
-            fetch_schedule(net);
-            next_schedule = now_ms() + (have_live_schedule ? SCHEDULE_EVERY_MS : 3000);   /* Wi-Fi may not be up yet */
-        }
-        /* first wanted URL that is missing or about to go stale */
-        char *todo = NULL;
-        pthread_mutex_lock(&mu);
-        for (int i = 0; i < nwant && !todo; i++) {
-            entry_t *e = find(want[i]);
-            if (!e || (!e->failed && now_ms() - e->at > FRESH_MS - 120000) ||
-                (e->failed && now_ms() - e->at > 60000))
-                todo = strdup(want[i]);
-        }
-        pthread_mutex_unlock(&mu);
+        todo = next_want(WANT_N);
         if (!todo) { sleep(1); continue; }
-        char final[2048];
-        int64_t t0 = now_ms();
-        if (http_resolve(net, todo, final, sizeof final) == 0) {
-            probe_t pr;
-            int64_t t1 = now_ms();
-            probe_any(net, todo, final, &pr);
-            store(todo, final, &pr);
-            static const char *fmts[] = {"unknown", "mp3", "mp4/aac", "wav"};
-            LOG("resolve: %lld ms (+probe %lld ms: %s%s) -> %.60s",
-                (long long)(t1 - t0), (long long)(now_ms() - t1), fmts[pr.fmt],
-                pr.fmt == FMT_MP3 && pr.mp3.has_toc ? " VBR+toc" : "", final);
-        } else {
-            store(todo, NULL, NULL);
-        }
-        free(todo);
+        resolve_one(net, todo);
     }
     return NULL;
 }

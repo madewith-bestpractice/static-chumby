@@ -432,18 +432,8 @@ static __inline int FASTABS(int x)
 
 static __inline int CLZ(int x)
 {
-  int numZeros;
-
-  if (!x)
-    return (sizeof(int) * 8);
-
-  numZeros = 0;
-  while (!(x & 0x80000000)) {
-    numZeros++;
-    x <<= 1;
-  }
-
-  return numZeros;
+  /* chumby: ARMv5's clz instruction (was a bit-at-a-time loop) */
+  return x ? __builtin_clz((unsigned int)x) : (int)(sizeof(int) * 8);
 }
 
 /* returns 64-bit value in [edx:eax] */

@@ -14,8 +14,34 @@
 struct net_ctx {
     mbedtls_entropy_context ent;
     mbedtls_ctr_drbg_context drbg;
-    mbedtls_ssl_config conf;
+    mbedtls_ssl_config conf;     /* TLS 1.2 only: resumption costs no public-key math */
+    mbedtls_ssl_config conf13;   /* default (1.3 preferred), for hosts that refuse 1.2 */
 };
+
+/* Hosts that failed a TLS 1.2 handshake: use conf13 for them from then on. */
+#define TLS13_N 16
+static char tls13_host[TLS13_N][128];
+static int tls13_next;
+static pthread_mutex_t tls13_mu = PTHREAD_MUTEX_INITIALIZER;
+static int host_needs13(const char *h) {
+    int r = 0;
+    pthread_mutex_lock(&tls13_mu);
+    for (int i = 0; i < TLS13_N && !r; i++) r = !strcmp(tls13_host[i], h);
+    pthread_mutex_unlock(&tls13_mu);
+    return r;
+}
+static void host_mark13(const char *h) {
+    pthread_mutex_lock(&tls13_mu);
+    snprintf(tls13_host[tls13_next], sizeof tls13_host[0], "%s", h);
+    tls13_next = (tls13_next + 1) % TLS13_N;
+    pthread_mutex_unlock(&tls13_mu);
+}
+
+/* P-256 first: mbedTLS's NIST fast reduction + fixed-point comb make it the
+ * cheapest key exchange here (no FPU, 454 MHz). */
+static const uint16_t tls_groups[] = {
+    MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1, MBEDTLS_SSL_IANA_TLS_GROUP_X25519,
+    MBEDTLS_SSL_IANA_TLS_GROUP_SECP384R1, MBEDTLS_SSL_IANA_TLS_GROUP_NONE };
 
 /* The CA bundle is parsed ONCE (333 KB of PEM is seconds of CPU here) and
  * shared read-only by every thread's context. */
@@ -41,25 +67,33 @@ net_ctx_t *net_new(const char *ca_file) {
     net_ctx_t *c = calloc(1, sizeof *c);
     mbedtls_entropy_init(&c->ent);
     mbedtls_ctr_drbg_init(&c->drbg);
-    mbedtls_ssl_config_init(&c->conf);
     const char *pers = "static-chumby";
     if (mbedtls_ctr_drbg_seed(&c->drbg, mbedtls_entropy_func, &c->ent,
                               (const unsigned char *)pers, strlen(pers)) != 0) {
         LOG("net: drbg seed failed");
         return NULL;
     }
-    mbedtls_ssl_config_defaults(&c->conf, MBEDTLS_SSL_IS_CLIENT,
-                                MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
-    mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-    mbedtls_ssl_conf_ca_chain(&c->conf, ca, NULL);
-    mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &c->drbg);
-    mbedtls_ssl_conf_read_timeout(&c->conf, 20000);
+    mbedtls_ssl_config *confs[2] = { &c->conf, &c->conf13 };
+    for (int i = 0; i < 2; i++) {
+        mbedtls_ssl_config *cf = confs[i];
+        mbedtls_ssl_config_init(cf);
+        mbedtls_ssl_config_defaults(cf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+        mbedtls_ssl_conf_authmode(cf, MBEDTLS_SSL_VERIFY_REQUIRED);
+        mbedtls_ssl_conf_ca_chain(cf, ca, NULL);
+        mbedtls_ssl_conf_rng(cf, mbedtls_ctr_drbg_random, &c->drbg);
+        mbedtls_ssl_conf_read_timeout(cf, 20000);
+        mbedtls_ssl_conf_groups(cf, tls_groups);
+    }
+    /* TLS 1.3 resumption still does a full ECDHE (servers only offer psk_dhe_ke):
+     * ~0.5 s here, every 30 s for presence. A 1.2 resumption is ~0.1 s. */
+    mbedtls_ssl_conf_max_tls_version(&c->conf, MBEDTLS_SSL_VERSION_TLS1_2);
     return c;
 }
 
 void net_free(net_ctx_t *c) {
     if (!c) return;
     mbedtls_ssl_config_free(&c->conf);
+    mbedtls_ssl_config_free(&c->conf13);
     mbedtls_ctr_drbg_free(&c->drbg);
     mbedtls_entropy_free(&c->ent);
     free(c);
@@ -160,6 +194,58 @@ static void sess_save(conn_t *k) {
     pthread_mutex_unlock(&sess_mu);
 }
 
+/* Persist the session cache so a restart (update, respawn) or a quick power
+ * cycle resumes instead of doing full handshakes. Saved rarely (every 30 min
+ * and at exit) to spare the flash. File: [u16 host len][host][u32 len][session]... */
+void net_sessions_save(const char *path) {
+    char tmp[300];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    static unsigned char b[4096];
+    int n = 0;
+    pthread_mutex_lock(&sess_mu);
+    for (int i = 0; i < SESS_N; i++) {
+        size_t len = 0;
+        if (!sess[i].valid || mbedtls_ssl_session_save(&sess[i].s, b, sizeof b, &len) != 0) continue;
+        uint16_t hl = (uint16_t)strlen(sess[i].host);
+        uint32_t sl = (uint32_t)len;
+        fwrite(&hl, 2, 1, f); fwrite(sess[i].host, 1, hl, f);
+        fwrite(&sl, 4, 1, f); fwrite(b, 1, len, f);
+        n++;
+    }
+    pthread_mutex_unlock(&sess_mu);
+    if (fclose(f) == 0) rename(tmp, path);
+    LOG("net: saved %d TLS sessions", n);
+}
+
+void net_sessions_load(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    static unsigned char b[4096];
+    int n = 0;
+    pthread_mutex_lock(&sess_mu);
+    for (;;) {
+        uint16_t hl; uint32_t sl;
+        char host[256];
+        if (fread(&hl, 2, 1, f) != 1 || hl >= sizeof host || fread(host, 1, hl, f) != hl) break;
+        host[hl] = 0;
+        if (fread(&sl, 4, 1, f) != 1 || sl > sizeof b || fread(b, 1, sl, f) != sl) break;
+        if (sess_next >= SESS_N) break;
+        int slot = sess_next;
+        mbedtls_ssl_session_init(&sess[slot].s);
+        if (mbedtls_ssl_session_load(&sess[slot].s, b, sl) != 0) { mbedtls_ssl_session_free(&sess[slot].s); continue; }
+        snprintf(sess[slot].host, sizeof sess[slot].host, "%s", host);
+        sess[slot].valid = 1;
+        sess_next++;
+        n++;
+    }
+    sess_next %= SESS_N;
+    pthread_mutex_unlock(&sess_mu);
+    fclose(f);
+    LOG("net: loaded %d TLS sessions", n);
+}
+
 static int conn_open(net_ctx_t *c, conn_t *k, const url_t *u) {
     mbedtls_net_init(&k->fd);
     mbedtls_ssl_init(&k->ssl);
@@ -169,7 +255,8 @@ static int conn_open(net_ctx_t *c, conn_t *k, const url_t *u) {
     int r = mbedtls_net_connect(&k->fd, u->host, u->port, MBEDTLS_NET_PROTO_TCP);
     if (r) { LOG("net: connect %s:%s failed (%d)", u->host, u->port, r); return -1; }
     if (!u->https) return 0;
-    if ((r = mbedtls_ssl_setup(&k->ssl, &c->conf)) ||
+    int use13 = host_needs13(u->host);
+    if ((r = mbedtls_ssl_setup(&k->ssl, use13 ? &c->conf13 : &c->conf)) ||
         (r = mbedtls_ssl_set_hostname(&k->ssl, u->host))) return -1;
     mbedtls_ssl_set_bio(&k->ssl, &k->fd, mbedtls_net_send, NULL, mbedtls_net_recv_timeout);
     sess_offer(k);
@@ -178,12 +265,19 @@ static int conn_open(net_ctx_t *c, conn_t *k, const url_t *u) {
         if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
             char e[120]; mbedtls_strerror(r, e, sizeof e);
             LOG("net: TLS handshake with %s failed: %s", u->host, e);
+            if (!use13 && (r == MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE || r == MBEDTLS_ERR_SSL_BAD_PROTOCOL_VERSION ||
+                           r == MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE)) {   /* a 1.3-only host: retry once with 1.3 */
+                host_mark13(u->host);
+                mbedtls_ssl_free(&k->ssl);
+                mbedtls_net_free(&k->fd);
+                return conn_open(c, k, u);
+            }
             return -1;
         }
     }
     k->shook = 1;
     int64_t took = now_ms() - t0;
-    if (took > 150) LOG("net: TLS %s %s in %lld ms", u->host, mbedtls_ssl_get_version(&k->ssl), (long long)took);
+    LOG("net: TLS %s %s in %lld ms", u->host, mbedtls_ssl_get_version(&k->ssl), (long long)took);
     return 0;
 }
 
@@ -347,19 +441,25 @@ int http_send(net_ctx_t *c, const char *method, const char *url, const char *jso
 
 struct net_stream {
     conn_t k;
+    char eff[2048];      /* the URL that answered (after any redirects) */
     char pre[16384];     /* body bytes that arrived with the headers */
     size_t pre_len, pre_off;
 };
 
-net_stream_t *http_stream_open(net_ctx_t *c, const char *url, int64_t from, int64_t to,
-                               int *status, int64_t *total) {
+/* One request. A 3xx fills `loc` (absolute) and returns NULL. */
+static net_stream_t *stream_open1(net_ctx_t *c, const char *url, int64_t from, int64_t to,
+                                  int *status, int64_t *total, char *loc, size_t loc_cap) {
     url_t u;
     *status = -1; *total = 0;
+    loc[0] = 0;
     if (parse_url(url, &u)) return NULL;
     net_stream_t *s = calloc(1, sizeof *s);
     if (conn_open(c, &s->k, &u)) { conn_close(&s->k); free(s); return NULL; }
     char range[64] = "";
-    if (from > 0 || to >= 0) {
+    /* Always ask for a range, even from 0: some hosts answer a range request
+     * themselves (206) but redirect a plain GET (transistor.fm), and the
+     * resolver walked the chain WITH a range. */
+    {
         if (to >= 0) snprintf(range, sizeof range, "Range: bytes=%lld-%lld\r\n", (long long)from, (long long)to);
         else snprintf(range, sizeof range, "Range: bytes=%lld-\r\n", (long long)from);
     }
@@ -384,6 +484,12 @@ net_stream_t *http_stream_open(net_ctx_t *c, const char *url, int64_t from, int6
     size_t body_at = (size_t)(end - hdr) + 4;
     end[2] = 0;
     sscanf(hdr, "HTTP/%*s %d", status);
+    if (*status >= 300 && *status < 400) {
+        char l[2048];
+        if (header(hdr, "Location", l, sizeof l)) join_location(&u, l, loc, loc_cap);
+        http_stream_close(s);
+        return NULL;
+    }
     char v[128];
     if (header(hdr, "Content-Range", v, sizeof v)) {           /* bytes a-b/total */
         char *slash = strchr(v, '/');
@@ -395,8 +501,26 @@ net_stream_t *http_stream_open(net_ctx_t *c, const char *url, int64_t from, int6
     }
     s->pre_len = hl - body_at;
     memcpy(s->pre, hdr + body_at, s->pre_len);
+    snprintf(s->eff, sizeof s->eff, "%s", url);
     return s;
 }
+
+/* Follows redirects: a resolved URL can still bounce. Some hosts answer a tiny
+ * range themselves (the resolver's 2-byte probe) but redirect any real read to
+ * the file's actual home (transistor.fm). */
+net_stream_t *http_stream_open(net_ctx_t *c, const char *url, int64_t from, int64_t to,
+                               int *status, int64_t *total) {
+    char cur[2048], loc[2048];
+    snprintf(cur, sizeof cur, "%s", url);
+    for (int hop = 0; hop < 5; hop++) {
+        net_stream_t *s = stream_open1(c, cur, from, to, status, total, loc, sizeof loc);
+        if (s || !loc[0]) return s;
+        snprintf(cur, sizeof cur, "%s", loc);
+    }
+    return NULL;
+}
+
+const char *http_stream_url(net_stream_t *s) { return s->eff; }
 
 int http_stream_read(net_stream_t *s, char *buf, size_t n) {
     if (s->pre_off < s->pre_len) {

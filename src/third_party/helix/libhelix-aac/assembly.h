@@ -538,21 +538,8 @@ static __inline int FASTABS(int x)
 
 static __inline int CLZ(int x)
 {
-	int numZeros;
-
-	if (!x)
-		return 32;
-
-	/* count leading zeros with binary search (function should be 17 ARM instructions total) */
-	numZeros = 1;
-	if (!((unsigned int)x >> 16))	{ numZeros += 16; x <<= 16; }
-	if (!((unsigned int)x >> 24))	{ numZeros +=  8; x <<=  8; }
-	if (!((unsigned int)x >> 28))	{ numZeros +=  4; x <<=  4; }
-	if (!((unsigned int)x >> 30))	{ numZeros +=  2; x <<=  2; }
-
-	numZeros -= ((unsigned int)x >> 31);
-
-	return numZeros;
+	/* chumby: ARMv5's clz instruction (was a 17-instruction binary search) */
+	return x ? __builtin_clz((unsigned int)x) : 32;
 }
 
 typedef union _U64 {

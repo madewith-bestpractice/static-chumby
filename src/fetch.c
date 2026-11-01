@@ -83,6 +83,20 @@ struct prebuf {
     int dead;   /* the thread gave up while unattached: the owner frees on cancel */
 };
 
+
+/* Ring copies: one 64-bit modulo per call, then at most two memcpy segments
+ * (a per-byte `% cap` on an int64 is a library division call on ARMv5). */
+static void ring_put(uint8_t *ring, size_t cap, int64_t pos, const char *src, size_t n) {
+    size_t at = (size_t)(pos % (int64_t)cap), first = cap - at < n ? cap - at : n;
+    memcpy(ring + at, src, first);
+    if (n > first) memcpy(ring, src + first, n - first);
+}
+static void ring_get(const uint8_t *ring, size_t cap, int64_t pos, char *dst, size_t n) {
+    size_t at = (size_t)(pos % (int64_t)cap), first = cap - at < n ? cap - at : n;
+    memcpy(dst, ring + at, first);
+    if (n > first) memcpy(dst + first, ring, n - first);
+}
+
 static void *pb_run(void *arg) {
     prebuf_t *p = arg;
     net_ctx_t *net = net_new(app_file("cacert.pem"));
@@ -112,7 +126,7 @@ static void *pb_run(void *arg) {
             if (r <= 0) { http_stream_close(s); if (r == 0) goto drain; attempts++; break; }
             attempts = 0;
             pthread_mutex_lock(&p->mu);
-            for (int i = 0; i < r; i++) p->ring[(p->hi + i) % p->cap] = (uint8_t)buf[i];
+            ring_put(p->ring, p->cap, p->hi, buf, (size_t)r);
             p->hi += r;
             if (p->hi - p->lo > (int64_t)p->cap) p->lo = p->hi - (int64_t)p->cap;
             int fd = p->out_fd;
@@ -124,7 +138,7 @@ static void *pb_run(void *arg) {
                     size_t n = (size_t)(to - from);
                     if (n > sizeof buf) n = sizeof buf;
                     char out[8192];
-                    for (size_t i = 0; i < n; i++) out[i] = (char)p->ring[(from + (int64_t)i) % p->cap];
+                    ring_get(p->ring, p->cap, from, out, n);
                     pthread_mutex_unlock(&p->mu);
                     if (!n) break;
                     if (write_all(fd, out, n)) { http_stream_close(s); goto done; }
@@ -146,7 +160,7 @@ drain:;
             pthread_mutex_lock(&p->mu);
             size_t n = (size_t)(p->hi - p->out_pos);
             if (n > sizeof out) n = sizeof out;
-            for (size_t i = 0; i < n; i++) out[i] = (char)p->ring[(p->out_pos + (int64_t)i) % p->cap];
+            ring_get(p->ring, p->cap, p->out_pos, out, n);
             p->out_pos += (int64_t)n;
             pthread_mutex_unlock(&p->mu);
             if (!n || write_all(fd, out, n)) break;

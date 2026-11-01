@@ -25,11 +25,17 @@ int http_send(net_ctx_t *c, const char *method, const char *url, const char *jso
 
 /* Streaming GET with an optional byte range (to < 0: open-ended), positioned at
  * the body. status/total (file size from Content-Range, else Content-Length)
- * are filled. No redirects: pass a resolved URL. NULL on failure. */
+ * are filled. Follows up to 5 redirects (http_stream_url() says where it
+ * ended up). NULL on failure. */
 typedef struct net_stream net_stream_t;
 net_stream_t *http_stream_open(net_ctx_t *c, const char *url, int64_t from, int64_t to,
                                int *status, int64_t *total);
 int http_stream_read(net_stream_t *s, char *buf, size_t n);   /* >0, 0 EOF, <0 error */
+const char *http_stream_url(net_stream_t *s);                 /* where it ended up (after redirects) */
 void http_stream_close(net_stream_t *s);
 
 void buf_free(buf_t *b);
+
+/* The TLS session cache on disk (resume across restarts). */
+void net_sessions_save(const char *path);
+void net_sessions_load(const char *path);

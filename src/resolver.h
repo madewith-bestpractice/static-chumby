@@ -16,7 +16,7 @@ void resolver_want(const char *const *urls, int n);
 /* Final URL if cached and fresh; returns 1 and copies into out. */
 int resolver_lookup(const char *url, char *out, size_t cap);
 /* 0 not resolved yet, 1 resolved + playable natively, 2 resolved (ffmpeg
- * only), 3 resolution failed. */
+ * only), 3 resolution failed, 4 being resolved right now. */
 int resolver_status(const char *url);
 /* Like resolver_lookup, but only for MP3s we probed (ID3 size, bitrate, Xing
  * table): lets the player open at a computed byte offset in one request. */
