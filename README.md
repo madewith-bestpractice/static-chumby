@@ -31,7 +31,9 @@ then take the stick out. From then on Static starts at every boot.
 
 ## Use
 
-- **Turn the knob** to change stations. Tap a station name to jump to it.
+- **Turn the knob** to change stations. The two stations either side are kept
+  loaded, so the sound follows each click and crossfades, as on the phone. Tap
+  a station name to jump to it.
 - **Volume:** hold the top button and turn the knob. Tap the speaker glyph,
   bottom left, to mute.
 - **Heart** a show to save it; the list icon under the info dot shows your
@@ -61,7 +63,7 @@ one by itself. To turn updates off, create `/mnt/storage/static/noupdate`.
 | Network | `src/net.c`, `src/fetch.c` | mbedTLS 3.6. TLS 1.2 by default because its session resumption needs no public-key math (about 0.05 s against 0.5 s here); sessions are saved across restarts. Ranged streaming, and pre-buffers for the stations either side of the needle. |
 | Resolve + probe | `src/resolver.c`, `src/mp3probe.c`, `src/mp4.c` | A background thread walks redirect chains ahead of time, then probes each file: MP3 (ID3, bitrate, Xing table), MP4 (`moov` cached on disk with a 256-point seek table) or WAV. |
 | Decode | `src/decode.c`, `src/resample.c`, `src/third_party/helix` | One thread per stream: Helix fixed-point MP3/AAC (HE-AAC included), then a 16-tap polyphase resampler to 44.1 kHz. ffmpeg is only a fallback for other formats. |
-| Audio | `src/audio.c` | Mixes the decoded PCM so playback sits at the live position. Per-episode loudness gain from the schedule, a 450 ms station crossfade, and the next episode pre-launched before its boundary. A writer thread (`src/pcmout.c`) feeds the kernel's PCM device directly, with no `aplay` or alsa-lib; `aplay` is the fallback. |
+| Audio | `src/audio.c` | Mixes the decoded PCM so playback sits at the live position. Per-episode loudness gain from the schedule, a 300 ms equal-power station crossfade, pre-buffers for two stations each side of the needle (a click onto one is heard in about half a second), and the next episode pre-launched before its boundary. About 0.4 s of audio is queued ahead. A writer thread (`src/pcmout.c`) feeds the kernel's PCM device directly, with no `aplay` or alsa-lib; `aplay` is the fallback. |
 | Updates | `src/update.c`, `toolchain/boot.sh` | See above. `boot.sh` also keeps the client running and hands back to the stock UI if it can't. |
 
 Audio is never proxied or rehosted: the chumby streams straight from publishers.

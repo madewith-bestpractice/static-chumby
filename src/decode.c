@@ -210,13 +210,15 @@ int decode_start(const char *url, const probe_t *probe, int64_t seek_ms, prebuf_
     fcntl(in[1], F_SETFD, FD_CLOEXEC);
     j->in_fd = in[0];
     if (pb && prebuf_attach(pb, j->start_byte, in[1]) == 0) *used_pb = 1;
-    else if (pb) {
-        int64_t lo, hi;
-        prebuf_window(pb, &lo, &hi);
-        LOG("decode: pre-buffer missed: need byte %lld, window [%lld, %lld) (%+lld KB from its start)",
-            (long long)j->start_byte, (long long)lo, (long long)hi, (long long)((j->start_byte - lo) / 1024));
+    else {
+        if (pb) {   /* a miss falls through to a normal fetch (it used to start nothing: a silent stall) */
+            int64_t lo, hi;
+            prebuf_window(pb, &lo, &hi);
+            LOG("decode: pre-buffer missed: need byte %lld, window [%lld, %lld) (%+lld KB from its start)",
+                (long long)j->start_byte, (long long)lo, (long long)hi, (long long)((j->start_byte - lo) / 1024));
+        }
+        if (fetch_start(url, j->start_byte, in[1])) { close(in[0]); close(in[1]); if (probe->fmt == FMT_MP4) mp4_free(&j->mp4); free(j); return -1; }
     }
-    else if (fetch_start(url, j->start_byte, in[1])) { close(in[0]); close(in[1]); if (probe->fmt == FMT_MP4) mp4_free(&j->mp4); free(j); return -1; }
 
     pthread_t th;
     pthread_attr_t a;

@@ -270,12 +270,17 @@ static const ep_t *live_ep(int st, int64_t *off_out) {
     return &sched->st[st].eps[slot];
 }
 
+/* Presence and the remembered station follow a station only once it has been
+ * on for a moment: clicking through five stations shouldn't mean five presence
+ * swaps and five flash writes. */
+#define COMMIT_MS 3000
+static int64_t commit_at;
+
 static void tune(int st) {
     if (!sched || st == tuned) return;
     tuned = st;
     audio_tune(st);
-    resolver_set_presence(sched->st[st].id);
-    save_last_station(sched->st[st].id);
+    commit_at = now_ms() + COMMIT_MS;
     LOG("tune: %s", sched->st[st].id);
 }
 
@@ -1014,21 +1019,40 @@ int main(int argc, char **argv) {
         nf += audio_pollfds(fds + nf, 12 - nf);
         double target = sched ? dial_target() : dial;
         int animating = fabs(target - dial) > 0.002;
-        poll(fds, (nfds_t)nf, animating ? 20 : 100);
+        int to = animating ? 20 : 100;
+        if (to > audio_max_sleep_ms()) to = audio_max_sleep_ms();
+        poll(fds, (nfds_t)nf, to);
         int input = 0;
         if (cycle_mode) { cycle_mode = 0; mode = (mode + 1) % 3; input = 1; }
         if (open_qr) { open_qr = 0; if (qr_url[0]) { qr_back = mode; mode = MODE_QR; input = 1; } }
         for (int i = 0; i < ninput; i++) if (fds[i].revents & POLLIN) { handle_input(fds[i].fd); input = 1; }
 
         audio_set_network_ready(resolver_network_ready());
-        if (sched && now_ms() - last_knob_ms > 1500) {   /* pre-buffer the needle's neighbors once it rests */
+        if (sched && now_ms() - last_knob_ms > 600) {   /* pre-buffer two stations each side once the needle rests */
             int nd = station_under_dial();
-            audio_set_neighbors(mod(nd + 1, sched->n), mod(nd - 1, sched->n));
+            int nbs[4] = { mod(nd + 1, sched->n), mod(nd - 1, sched->n), mod(nd + 2, sched->n), mod(nd - 2, sched->n) };
+            int k = 0;
+            for (int i = 0; i < 4; i++) {   /* small dials: no duplicates, never the needle itself */
+                int dup = nbs[i] == nd;
+                for (int j = 0; j < k; j++) dup |= nbs[j] == nbs[i];
+                if (!dup) nbs[k++] = nbs[i];
+            }
+            audio_set_neighbors(nbs, k);
         }
         audio_service(sched);
 
         int64_t t = now_ms();
-        if (sched && tuned != station_under_dial() && t - last_knob_ms > SETTLE_MS) tune(station_under_dial());
+        /* a pre-buffered station tunes on the click itself (the audio follows the
+         * dial, crossfading); others once the knob rests, so a fast spin doesn't
+         * open a connection per station passed */
+        if (sched && tuned != station_under_dial() &&
+            (t - last_knob_ms > SETTLE_MS || audio_instant(sched, station_under_dial())))
+            tune(station_under_dial());
+        if (sched && commit_at && t >= commit_at && tuned >= 0) {
+            commit_at = 0;
+            resolver_set_presence(sched->st[tuned].id);
+            save_last_station(sched->st[tuned].id);
+        }
         if (sched && t - last_wants > 1000) {
             update_wants(); last_wants = t;
             /* Debug: `echo "tune 3" > /tmp/static-cmd` turns the dial to station 3;
@@ -1101,6 +1125,7 @@ int main(int argc, char **argv) {
         }
     }
     LOG("static-radio exiting");
+    if (sched && commit_at && tuned >= 0) save_last_station(sched->st[tuned].id);
     net_sessions_save(STATIC_DIR "/tls-sessions");
     audio_shutdown();
     return 0;

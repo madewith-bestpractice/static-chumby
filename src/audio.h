@@ -13,7 +13,9 @@ void audio_set_volume(int v, int steps);
  * decoder is launched: at boot ffmpeg would sit in DNS/TCP retries. */
 void audio_set_network_ready(int ready);
 /* Stations to keep pre-buffered (either side of the needle); -1 = none. */
-void audio_set_neighbors(int a, int b);
+void audio_set_neighbors(const int *st, int n);   /* pre-buffer these stations (up to 4) */
+int audio_instant(const sched_t *sc, int st);      /* st's live audio is pre-buffered: tune on the click */
+int audio_max_sleep_ms(void);
 void audio_schedule_changed(void);     /* kill streams whose slot/url no longer match */
 
 /* Fill pollfds the engine needs; returns count. */

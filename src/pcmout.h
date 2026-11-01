@@ -5,3 +5,4 @@
 int pcmout_start(int read_fd);
 int pcmout_running(void);   /* the thread is alive */
 int pcmout_done(void);      /* it has exited (EOF or a device error) */
+int pcmout_queued_frames(void);   /* audio past the pipe not yet heard (device delay + held) */

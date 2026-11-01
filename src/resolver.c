@@ -550,6 +550,7 @@ static void resolve_one(net_ctx_t *net, char *todo) {
 }
 
 static void *run(void *arg) {
+    thread_background();
     (void)arg;
     net_ctx_t *net = net_new(app_file("cacert.pem"));
     if (!net) { LOG("resolver: no TLS context"); return NULL; }

@@ -22,6 +22,8 @@
 
 static int pcm_fd = -1, in_fd = -1;
 static volatile int running, done;
+static volatile int dev_queued;        /* frames the device still has to play (after the last write) */
+static volatile int held_frames;       /* read from the pipe, not yet written */
 
 static void p_mask(struct snd_pcm_hw_params *p, int n, unsigned bit) {
     struct snd_mask *m = &p->masks[n - SNDRV_PCM_HW_PARAM_FIRST_MASK];
@@ -81,7 +83,7 @@ static int pcm_setup(void) {
     sw.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
     sw.period_step = 1;
     sw.avail_min = PERIOD;
-    sw.start_threshold = buffer / 2;     /* start once ~185 ms is queued */
+    sw.start_threshold = PERIOD * 2;     /* start once ~93 ms is queued (the mixer keeps ~350 ms) */
     sw.stop_threshold = buffer;          /* stop (and report) on underrun */
     sw.silence_threshold = 0;
     sw.silence_size = 0;
@@ -116,13 +118,16 @@ static int write_frames(const int16_t *buf, unsigned frames) {
         }
         buf += x.result * 2;
         frames -= (unsigned)x.result;
+        held_frames = (int)frames;
+        snd_pcm_sframes_t d = 0;
+        if (ioctl(pcm_fd, SNDRV_PCM_IOCTL_DELAY, &d) == 0) dev_queued = (int)d;
     }
     return 0;
 }
 
 static void *run(void *arg) {
     (void)arg;
-    static int16_t buf[4096 * 2];
+    static int16_t buf[1024 * 2];   /* one mixer chunk: keeps what we hold (and the latency) small */
     int have = 0;   /* bytes in buf */
     for (;;) {
         ssize_t r = read(in_fd, (char *)buf + have, sizeof buf - (size_t)have);
@@ -130,6 +135,7 @@ static void *run(void *arg) {
         if (r <= 0) break;   /* EOF: the client is shutting down */
         have += (int)r;
         unsigned frames = (unsigned)have / 4;
+        held_frames = (int)frames;
         if (frames && write_frames(buf, frames)) break;
         int used = (int)frames * 4;
         memmove(buf, (char *)buf + used, (size_t)(have - used));
@@ -164,4 +170,16 @@ int pcmout_start(int read_fd) {
 }
 
 int pcmout_running(void) { return running; }
+/* Asked live (the device drains between writes, so a value cached at write
+ * time would read high and starve it). Before playback starts, DELAY reports
+ * what's queued; after an underrun it fails: count that as empty. */
+int pcmout_queued_frames(void) {
+    int fd = pcm_fd;
+    if (!running || fd < 0) return 0;
+    snd_pcm_sframes_t d = 0;
+    if (ioctl(fd, SNDRV_PCM_IOCTL_DELAY, &d) != 0) d = 0;
+    if (d < 0) d = 0;
+    dev_queued = (int)d;
+    return (int)d + held_frames;
+}
 int pcmout_done(void) { return done; }

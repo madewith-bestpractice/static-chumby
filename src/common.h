@@ -27,6 +27,16 @@ int app_installed(void);            /* running from STATIC_DIR (not a USB stick)
 /* Phone parity (radio_audio_engine.dart): bulletins never play past 30 s. */
 #define BULLETIN_CAP_MS 30000
 
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+/* Background threads (resolver, pre-buffers, updater) run niced, so their TLS
+ * handshakes (up to ~3 s of CPU each here) can't starve the mixer and the
+ * current station's decoder: that's an audible underrun. */
+static inline void thread_background(void) {
+    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5);
+}
+
 static inline int64_t now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);

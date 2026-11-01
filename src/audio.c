@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <signal.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -28,11 +29,15 @@
  * buffer (16384 frames = 371 ms) on the direct path; aplay buffers a bit more. */
 static int out_latency_ms = 850;
 #define OUT_LATENCY_MS out_latency_ms
+/* Direct output keeps only this much queued (pipe + device), measured live, so
+ * a station change is heard ~0.4 s after it's mixed instead of ~0.75 s. Each
+ * chunk is mixed for the moment it will actually be heard. */
+#define OUT_TARGET_MS 400
 #define SYNC_SLOP_MS 120
 #define PRELAUNCH_MS 8000              /* start the next episode's decoder this early */
 #define FADE_FRAMES (RATE / 5)         /* 200 ms fade-in */
 #define MAX_STREAMS 3                  /* tuned now + tuned next + outgoing */
-#define XFADE_MS 450                   /* equal-power station crossfade (the watch's) */
+#define XFADE_MS 300                   /* equal-power station crossfade (the art dissolves in 200) */
 #define OUTGOING_MAX_MS 15000          /* stop the old station if the new never starts */
 
 typedef struct {
@@ -73,7 +78,7 @@ static const int64_t lead_min[4] = { 4000, 500, 200, 1500 }, lead_max[4] = { 250
 
 /* Neighbor pre-buffers: the stations either side of the needle keep a rolling
  * window of their live MP3 bytes, so tuning to one needs no connection at all. */
-#define NB_N 2
+#define NB_N 4                         /* two stations each side of the needle */
 #define NB_CAP (1024 * 1024)
 static struct { prebuf_t *p; int st, slot; char url[2048]; probe_t pr; } nb[NB_N];
 
@@ -91,7 +96,7 @@ static int64_t est_byte(const probe_t *p, int64_t ms) {
     }
     return -1;
 }
-static int nb_want[NB_N] = { -1, -1 };
+static int nb_want[NB_N] = { -1, -1, -1, -1 };
 
 static int nb_find(int st, int slot, const char *url) {
     for (int i = 0; i < NB_N; i++)
@@ -277,9 +282,16 @@ static stream_t *launch(int st, int slot, const char *url, int64_t seek_ms) {
 
 void audio_tune(int st) {
     if (st == tuned) return;
-    if (st >= 0 && tuned >= 0 && st != outgoing) {   /* keep the old station audible */
-        outgoing = tuned; outgoing_since = now_ms(); xfade_start = 0;
-    } else outgoing = -1;
+    int64_t now = now_ms();
+    if (st < 0 || tuned < 0) outgoing = -1;
+    else if (outgoing >= 0 && outgoing != st &&
+             (!xfade_start || now - xfade_start < XFADE_MS / 2)) {
+        /* clicking on before the last station got (mostly) audible: the one we
+         * still hear stays the outgoing station; the skipped one just goes */
+        if (xfade_start) { xfade_start = 0; outgoing_since = now; }
+    } else if (st != outgoing) {   /* keep the old station audible */
+        outgoing = tuned; outgoing_since = now; xfade_start = 0;
+    } else outgoing = -1;          /* back to the one fading out: it's simply the station again */
     tuned = st;
     tuned_at = now_ms();
     state = st < 0 ? AUDIO_IDLE : AUDIO_TUNING;
@@ -296,31 +308,65 @@ void audio_set_volume(int v, int steps) {
     master_q15 = (int32_t)(32767.0 * pow(10.0, -3.0 * (steps - v) / 20.0));
 }
 void audio_set_network_ready(int r) { net_ready = r; }
-void audio_set_neighbors(int a, int b) { nb_want[0] = a; nb_want[1] = b; }
+void audio_set_neighbors(const int *st, int n) {
+    for (int i = 0; i < NB_N; i++) nb_want[i] = i < n ? st[i] : -1;
+}
 
-/* Keep the neighbor pre-buffers on their stations' live MP3 episodes. */
+/* Can `st` be heard at once: a pre-buffer holds its live episode? */
+int audio_instant(const sched_t *sc, int st) {
+    int slot; int64_t off;
+    if (!sc || st < 0 || st >= sc->n || sched_live(sc, st, now_ms(), &slot, &off)) return 0;
+    for (int i = 0; i < NB_N; i++)
+        if (nb[i].p && nb[i].st == st && nb[i].slot == slot && !strcmp(nb[i].url, sc->st[st].eps[slot].url)) {
+            /* only if it already holds the bytes a launch would start from */
+            int64_t lo, hi, need = est_byte(&nb[i].pr, off + lead_ms[2]);
+            prebuf_window(nb[i].p, &lo, &hi);
+            return need >= lo && need + 16384 <= hi;
+        }
+    return 0;
+}
+
+/* Keep the neighbor pre-buffers on their stations' live episodes. Buffers are
+ * matched to wanted stations by STATION, not by slot: when the needle moves
+ * one notch the wanted set mostly overlaps the old one, and a buffer that's
+ * still wanted (or was just tuned) must survive the reshuffle. */
 static void nb_service(const sched_t *sc) {
     if (!sc || !net_ready) return;
     int64_t now = now_ms();
+    /* 1. drop buffers no longer wanted or no longer on their station's live episode */
     for (int i = 0; i < NB_N; i++) {
-        int st = nb_want[i];
+        if (!nb[i].p) continue;
+        int st = nb[i].st, wanted = st == tuned;   /* the tuned one: the launch is about to take it */
+        for (int k = 0; k < NB_N; k++) wanted |= nb_want[k] == st;
         int slot = -1; int64_t off = 0;
-        const ep_t *ep = NULL;
-        if (st >= 0 && st < sc->n && st != tuned && !sched_live(sc, st, now, &slot, &off)) ep = &sc->st[st].eps[slot];
+        int live = st >= 0 && st < sc->n && !sched_live(sc, st, now, &slot, &off) &&
+                   slot == nb[i].slot && !strcmp(sc->st[st].eps[slot].url, nb[i].url) &&
+                   (int64_t)sc->st[st].eps[slot].dur_s * 1000 - off > 30000;
+        if (!wanted || !live) { prebuf_cancel(nb[i].p); nb[i].p = NULL; continue; }
+        prebuf_set_limit(nb[i].p, est_byte(&nb[i].pr, off + 15000));   /* keep it rolling with live */
+    }
+    /* 2. start buffers for wanted stations that have none (never while a tune is
+     *    starting: a new one costs a TLS handshake) */
+    if (state != AUDIO_PLAYING) return;
+    for (int k = 0; k < NB_N; k++) {
+        int st = nb_want[k];
+        if (st < 0 || st >= sc->n || st == tuned) continue;
+        int have = 0, free_i = -1;
+        for (int i = 0; i < NB_N; i++) {
+            if (nb[i].p && nb[i].st == st) have = 1;
+            if (!nb[i].p && free_i < 0) free_i = i;
+        }
+        if (have || free_i < 0) continue;
+        int slot = -1; int64_t off = 0;
+        if (sched_live(sc, st, now, &slot, &off)) continue;
+        const ep_t *ep = &sc->st[st].eps[slot];
         char eff[2048]; probe_t pr;
-        int ok = ep && (int64_t)ep->dur_s * 1000 - off > 30000 && !ep->bulletin &&
-                 resolver_lookup_probe(ep->url, eff, sizeof eff, &pr) && (pr.fmt == FMT_MP3 || pr.fmt == FMT_MP4);
-        int have = ok && nb[i].p && nb[i].st == st && nb[i].slot == slot && !strcmp(nb[i].url, ep->url);
-        if (!have && nb[i].p) { prebuf_cancel(nb[i].p); nb[i].p = NULL; }
-        if (!ok) continue;
-        int64_t limit = est_byte(&pr, off + 15000);
-        if (have) { prebuf_set_limit(nb[i].p, limit); continue; }
-        /* a new pre-buffer costs a TLS handshake: never while a tune is starting */
-        if (state != AUDIO_PLAYING) continue;
+        if ((int64_t)ep->dur_s * 1000 - off <= 30000 || ep->bulletin ||
+            !resolver_lookup_probe(ep->url, eff, sizeof eff, &pr) || (pr.fmt != FMT_MP3 && pr.fmt != FMT_MP4)) continue;
         int64_t start = est_byte(&pr, off > 6000 ? off - 6000 : 0);   /* MP4 estimate: a wider margin */
-        nb[i].p = prebuf_start(eff, start, limit, NB_CAP);
-        nb[i].st = st; nb[i].slot = slot; nb[i].pr = pr;
-        snprintf(nb[i].url, sizeof nb[i].url, "%s", ep->url);
+        nb[free_i].p = prebuf_start(eff, start, est_byte(&pr, off + 15000), NB_CAP);
+        nb[free_i].st = st; nb[free_i].slot = slot; nb[free_i].pr = pr;
+        snprintf(nb[free_i].url, sizeof nb[free_i].url, "%s", ep->url);
         LOG("audio: pre-buffering st=%d slot=%d from byte %lld", st, slot, (long long)start);
     }
 }
@@ -329,7 +375,10 @@ void audio_schedule_changed(void) { /* streams are matched by url each tick; not
 
 int audio_pollfds(struct pollfd *fds, int max) {
     int n = 0;
-    if (aplay_fd >= 0 && n < max) { fds[n].fd = aplay_fd; fds[n].events = POLLOUT; n++; }
+    /* aplay: wake when its pipe has room. Direct: the pipe always has room (we
+     * keep it short on purpose), so the main loop wakes on a timer instead
+     * (audio_max_sleep_ms). */
+    if (aplay_fd >= 0 && !out_direct && n < max) { fds[n].fd = aplay_fd; fds[n].events = POLLOUT; n++; }
     for (int i = 0; i < MAX_STREAMS && n < max; i++)
         if (streams[i].used && !streams[i].eof && streams[i].rlen < RING_BYTES) {
             fds[n].fd = streams[i].fd; fds[n].events = POLLIN; n++;
@@ -546,7 +595,24 @@ void audio_service(const sched_t *sc) {
         if (!keep) stream_kill(s);
     }
 
-    /* write as many chunks as the output pipe accepts */
+    if (out_direct && aplay_fd >= 0) {
+        /* top up to OUT_TARGET_MS of queued audio, mixing each chunk for the
+         * moment it will be heard */
+        int pipe_bytes = 0;
+        if (ioctl(aplay_fd, FIONREAD, &pipe_bytes) != 0) pipe_bytes = 0;
+        int q = pipe_bytes / FRAME + pcmout_queued_frames();
+        const int target = RATE * OUT_TARGET_MS / 1000;
+        for (int n = 0; n < 24 && q < target; n++) {
+            out_latency_ms = q * 1000 / RATE;
+            if (!have_pending) { produce(sc, pending); have_pending = 1; }
+            ssize_t w = write(aplay_fd, pending, sizeof pending);
+            if (w != (ssize_t)sizeof pending) break;
+            have_pending = 0;
+            q += CHUNK_FRAMES;
+        }
+        return;
+    }
+    /* aplay: write as many chunks as its pipe accepts */
     for (int n = 0; n < 24 && aplay_fd >= 0; n++) {
         if (!have_pending) { produce(sc, pending); have_pending = 1; }
         ssize_t w = write(aplay_fd, pending, sizeof pending);
@@ -556,6 +622,9 @@ void audio_service(const sched_t *sc) {
 }
 
 int audio_state(void) { return state; }
+
+/* Longest the main loop may sleep without starving the output. */
+int audio_max_sleep_ms(void) { return out_direct ? 40 : 1000; }
 
 /* Close the device gently: this 2.6.28 sound driver can wedge for good (aplay
  * stuck in snd_pcm_open, no audio until a reboot) if a new aplay opens it while

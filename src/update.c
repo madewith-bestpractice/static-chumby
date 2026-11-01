@@ -179,6 +179,7 @@ static void check_once(void) {
 }
 
 static void *run(void *arg) {
+    thread_background();
     (void)arg;
     int64_t next = now_ms() + FIRST_CHECK_S * 1000LL;
     for (;;) {

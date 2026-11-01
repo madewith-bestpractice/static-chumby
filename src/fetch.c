@@ -98,6 +98,7 @@ static void ring_get(const uint8_t *ring, size_t cap, int64_t pos, char *dst, si
 }
 
 static void *pb_run(void *arg) {
+    thread_background();
     prebuf_t *p = arg;
     net_ctx_t *net = net_new(app_file("cacert.pem"));
     char buf[8192];
