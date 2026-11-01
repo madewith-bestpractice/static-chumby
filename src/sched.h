@@ -40,7 +40,8 @@ typedef struct {
  * streams added to the dial (never part of the shared schedule):
  *   [{"id": "...", "tag": "DIAL LABEL", "name": "Station name",
  *     "about": "One line", "url": "https://.../stream.mp3",
- *     "link": "https://station.site", "ink": "#RRGGBB", "after": "station_id"}]
+ *     "link": "https://station.site", "ink": "#RRGGBB", "after": "station_id",
+ *     "art": "/mnt/storage/static/<file>.rgb565"}]   (240x240 RGB565 LE, optional)
  * "after" places it after that station (default: the end of the dial). */
 #define LOCAL_STATIONS_FILE STATIC_DIR "/local-stations.json"
 

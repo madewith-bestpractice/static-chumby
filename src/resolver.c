@@ -97,11 +97,30 @@ void resolver_want_art(const char *const *urls, int n) {
     pthread_mutex_lock(&mu);
     for (int i = 0; i < nart_want; i++) free(art_want[i]);
     nart_want = 0;
-    for (int i = 0; i < n && nart_want < ART_N; i++) if (urls[i] && *urls[i]) art_want[nart_want++] = strdup(urls[i]);
+    for (int i = 0; i < n && nart_want < ART_N; i++)
+        if (urls[i] && *urls[i] && urls[i][0] != '/') art_want[nart_want++] = strdup(urls[i]);   /* '/': a local file */
     pthread_mutex_unlock(&mu);
 }
 
+/* Art from a local file (local-stations.json "art": an absolute path to 240x240
+ * RGB565, little-endian, like the baked covers). Main thread only. */
+static const uint16_t *local_art(const char *path) {
+    static struct { char path[256]; uint16_t *px; int missing; } c[4];
+    static int next;
+    for (int i = 0; i < 4; i++) if (!strcmp(c[i].path, path)) return c[i].missing ? NULL : c[i].px;
+    int i = next++ % 4;
+    free(c[i].px); c[i].px = NULL;
+    snprintf(c[i].path, sizeof c[i].path, "%s", path);
+    size_t len = 0;
+    char *b = read_file(path, &len);
+    if (b && len == ART_BYTES) c[i].px = (uint16_t *)b;
+    else { free(b); LOG("art: %s isn't a 240x240 RGB565 file", path); }
+    c[i].missing = !c[i].px;
+    return c[i].px;
+}
+
 const uint16_t *resolver_art(const char *url) {
+    if (url && url[0] == '/') return local_art(url);
     pthread_mutex_lock(&mu);
     art_t *a = url && *url ? art_find(url) : NULL;
     const uint16_t *px = a && !a->missing ? a->px : NULL;

@@ -81,7 +81,7 @@ static void add_local_stations(sched_t *s) {
         ep->show = json_str(c, "name", tag);
         ep->title = json_str(c, "about", "");
         ep->feed = url;
-        ep->image = "";
+        ep->image = json_str(c, "art", "");   /* an absolute path to 240x240 RGB565, or none */
         ep->link = json_str(c, "link", "");
         ep->dur_s = 86400 - 2;            /* one endless slot: the timeline maths never ends it */
         st.n = 1;
