@@ -58,19 +58,20 @@ one by itself. To turn updates off, create `/mnt/storage/static/noupdate`.
 |---|---|---|
 | UI, input, event loop | `src/main.c`, `src/ui.c` | Draws to `/dev/fb0` in RGB565. The art panel is composed once per change; a crossfade is one blend per frame. Fonts and icons are pre-rendered into headers by `tools/gen*.swift`. |
 | Schedule | `src/sched.c`, `src/json.c` | `schedule-wear.json` from data.staticradio.app, cached on disk. `sched_live()` is the phone's wall-clock-to-episode rule, with a 1.5 s gap between episodes. |
-| Network | `src/net.c`, `src/fetch.c` | mbedTLS 3.6 with per-host TLS session resumption, ranged streaming, and pre-buffers for the stations either side of the needle. |
+| Network | `src/net.c`, `src/fetch.c` | mbedTLS 3.6. TLS 1.2 by default because its session resumption needs no public-key math (about 0.05 s against 0.5 s here); sessions are saved across restarts. Ranged streaming, and pre-buffers for the stations either side of the needle. |
 | Resolve + probe | `src/resolver.c`, `src/mp3probe.c`, `src/mp4.c` | A background thread walks redirect chains ahead of time, then probes each file: MP3 (ID3, bitrate, Xing table), MP4 (`moov` cached on disk with a 256-point seek table) or WAV. |
 | Decode | `src/decode.c`, `src/resample.c`, `src/third_party/helix` | One thread per stream: Helix fixed-point MP3/AAC (HE-AAC included), then a 16-tap polyphase resampler to 44.1 kHz. ffmpeg is only a fallback for other formats. |
-| Audio | `src/audio.c` | Mixes the decoded PCM so playback sits at the live position. Per-episode loudness gain from the schedule, a 450 ms station crossfade, and the next episode pre-launched before its boundary. Output goes to ALSA through `aplay`. |
+| Audio | `src/audio.c` | Mixes the decoded PCM so playback sits at the live position. Per-episode loudness gain from the schedule, a 450 ms station crossfade, and the next episode pre-launched before its boundary. A writer thread (`src/pcmout.c`) feeds the kernel's PCM device directly, with no `aplay` or alsa-lib; `aplay` is the fallback. |
 | Updates | `src/update.c`, `toolchain/boot.sh` | See above. `boot.sh` also keeps the client running and hands back to the stock UI if it can't. |
 
 Audio is never proxied or rehosted: the chumby streams straight from publishers.
 The art is the phone app's riso-printed look, pre-rendered for this screen on
 Static's servers.
 
-Measured on the device: tuning to an MP3 station takes about 0.8 s, or about
-0.2 s from a neighbor pre-buffer. MP3 playback uses about 9% CPU for decoding;
-a 3-hour HE-AAC show uses about 44% in total.
+Measured on the device: from a cold boot, Static is playing about 7 s after it
+starts. Tuning to an MP3 station takes under a second, or about 0.3 s from a
+neighbor pre-buffer. While an MP3 station plays, Static uses about 24% of the
+CPU in total; a 3-hour HE-AAC show about 44%.
 
 ## Build
 
