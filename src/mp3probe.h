@@ -15,13 +15,15 @@ typedef struct {
     int64_t frames;        /* Xing frame count, 0 if unknown */
     int64_t xing_bytes;    /* Xing byte count, 0 if unknown */
     int samples_per_frame;
+    double byte_rate;      /* measured by walking the frames (padding included), 0 if unknown */
     uint8_t toc[100];
 } mp3info_t;
 
 /* Size of the ID3v2 tag at the start of buf (0 if none); needs >= 10 bytes. */
 int64_t mp3_id3_size(const uint8_t *buf, size_t len);
 
-/* Parse the first frame (and any Xing/Info header) at the start of buf.
+/* Parse the first frame (and any Xing/Info header) at the start of buf, and
+ * measure the real byte rate from the frames that follow (give it 16 KB).
  * Fills info (audio_start/total must already be set). Returns 1 on success. */
 int mp3_parse_first_frame(const uint8_t *buf, size_t len, mp3info_t *info);
 

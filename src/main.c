@@ -284,6 +284,26 @@ static void tune(int st) {
     LOG("tune: %s", sched->st[st].id);
 }
 
+/* Bulletin breaks follow the board's slot list (slots.h), so this Chumby plays
+ * the same bulletin as every phone on the station. */
+static slotlist_t *slots;
+static int64_t slots_applied_at, slots_asked_for;
+
+static void service_slots(void) {
+    slotlist_t *l = resolver_take_slots();
+    if (l) { slots_free(slots); slots = l; slots_applied_at = 0; }
+    int64_t now = now_ms();
+    if (!sched || now - slots_applied_at < 1000) return;
+    slots_applied_at = now;
+    if (slots && slots_apply(sched, slots, now)) audio_schedule_changed();
+    /* one fetch ~120 s before the tuned station's next break (final by then) */
+    int64_t nb = tuned >= 0 ? slots_next_break_ms(sched, tuned, now) : -1;
+    if (nb > 0 && nb <= SLOTS_LEAD_MS) {
+        int64_t brk = (now + nb) / 10000;
+        if (brk != slots_asked_for) { slots_asked_for = brk; resolver_slots_request(); }
+    }
+}
+
 static void adopt_schedule(sched_t *s) {
     const char *keep = tuned >= 0 && sched ? sched->st[tuned].id : last_id;
     int idx = 0;
@@ -1016,6 +1036,7 @@ int main(int argc, char **argv) {
         loop_beat = now_ms();
         sched_t *fresh = resolver_take_schedule();
         if (fresh) adopt_schedule(fresh);
+        service_slots();
 
         struct pollfd fds[12];
         int nf = 0;

@@ -10,6 +10,13 @@ int resolver_start(void);
 /* A newer schedule, or NULL. Caller owns it. */
 sched_t *resolver_take_schedule(void);
 
+/* The bulletin slot list (slots.h): a fresh one, or NULL; caller owns it.
+ * Fetched at start, every 10 minutes, and when main asks (once ~120 s before
+ * each break on the tuned station: inside the lock window, so final). */
+#include "slots.h"
+slotlist_t *resolver_take_slots(void);
+void resolver_slots_request(void);
+
 /* Priority-ordered URLs to keep resolved (main thread replaces the list). */
 void resolver_want(const char *const *urls, int n);
 

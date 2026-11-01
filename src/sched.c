@@ -165,6 +165,9 @@ sched_t *sched_parse(char *text) {
             ep->gain_db = json_num(e, "gainDb", json_num(e, "volume_offset_db", 0));
             const char *sponsor = json_str(e, "sponsorName", "");
             ep->bulletin = json_bool(e, "isBulletin", 0) || !strcasecmp(sponsor, "community bulletin");
+            ep->placement = json_str(e, "placementId", NULL);
+            ep->b_url = ep->url;
+            ep->b_link = ep->link;
             st->sum_ms += (int64_t)dur * 1000;
         }
         if (st->n == 0 || st->loop_s <= 0) { free(st->eps); continue; }
@@ -175,8 +178,18 @@ sched_t *sched_parse(char *text) {
     return s;
 }
 
+void sched_keep(sched_t *s, char *str) {
+    if (s->nkeep == s->ckeep) {
+        s->ckeep = s->ckeep ? s->ckeep * 2 : 16;
+        s->keep = realloc(s->keep, (size_t)s->ckeep * sizeof *s->keep);
+    }
+    s->keep[s->nkeep++] = str;
+}
+
 void sched_free(sched_t *s) {
     if (!s) return;
+    for (int i = 0; i < s->nkeep; i++) free(s->keep[i]);
+    free(s->keep);
     for (int i = 0; i < s->n; i++) free(s->st[i].eps);
     json_free(s->pool);
     free(s->text);

@@ -246,6 +246,49 @@ void resolver_want(const char *const *urls, int n) {
     pthread_mutex_unlock(&mu);
 }
 
+static slotlist_t *slots_pending;
+static int64_t slots_at;          /* next slot-list fetch (0 = now) */
+#define SLOTS_EVERY_MS (10 * 60 * 1000)
+
+slotlist_t *resolver_take_slots(void) {
+    pthread_mutex_lock(&mu);
+    slotlist_t *l = slots_pending;
+    slots_pending = NULL;
+    pthread_mutex_unlock(&mu);
+    return l;
+}
+
+void resolver_slots_request(void) {
+    pthread_mutex_lock(&mu);
+    slots_at = 0;
+    pthread_mutex_unlock(&mu);
+}
+
+/* Today's list on the Central calendar, plus tomorrow's when a break within
+ * the next 3 h falls after Central midnight. 1 if a list came back. */
+static int fetch_slots(net_ctx_t *net) {
+    char dates[2][11];
+    int64_t now = now_ms();
+    slots_central_date(now, dates[0]);
+    slots_central_date(now + 3 * 3600 * 1000LL, dates[1]);
+    int nd = strcmp(dates[0], dates[1]) ? 2 : 1;
+    slotlist_t *l = calloc(1, sizeof *l);
+    for (int i = 0; i < nd; i++) {
+        char url[128];
+        snprintf(url, sizeof url, SLOTS_URL "%s", dates[i]);
+        buf_t b = {0};
+        int st = http_get(net, url, 1 << 20, &b);
+        if (st == 200 && b.data) { if (slots_add(l, b.data)) LOG("slots: bad list for %s", dates[i]); }
+        else { LOG("slots: fetch %s failed (%d)", dates[i], st); buf_free(&b); }
+    }
+    if (!l->nt) { slots_free(l); return 0; }
+    pthread_mutex_lock(&mu);
+    if (slots_pending) slots_free(slots_pending);
+    slots_pending = l;
+    pthread_mutex_unlock(&mu);
+    return 1;
+}
+
 sched_t *resolver_take_schedule(void) {
     pthread_mutex_lock(&mu);
     sched_t *s = pending;
@@ -456,7 +499,7 @@ static void probe_any(net_ctx_t *net, const char *orig, char *url, probe_t *pr) 
         if (pos + r > id3) { keep = (size_t)(pos + r - id3); memmove(buf, buf + (id3 - pos), keep); }
         pos += r;
     }
-    while (keep < 8192 && (r = http_stream_read(s, (char *)buf + keep, sizeof buf - keep)) > 0) keep += (size_t)r;
+    while (keep < sizeof buf && (r = http_stream_read(s, (char *)buf + keep, sizeof buf - keep)) > 0) keep += (size_t)r;
     http_stream_close(s);
     info->audio_start = id3;
     info->total = total;
@@ -597,6 +640,16 @@ static void *run(void *arg) {
         if (now_ms() >= next_schedule) {
             fetch_schedule(net);
             next_schedule = now_ms() + (have_live_schedule ? SCHEDULE_EVERY_MS : 3000);   /* Wi-Fi may not be up yet */
+            continue;
+        }
+        pthread_mutex_lock(&mu);
+        int slots_due = have_live_schedule && now_ms() >= slots_at;
+        pthread_mutex_unlock(&mu);
+        if (slots_due) {
+            int ok = fetch_slots(net);
+            pthread_mutex_lock(&mu);
+            slots_at = now_ms() + (ok ? SLOTS_EVERY_MS : 60000);
+            pthread_mutex_unlock(&mu);
             continue;
         }
         if (fetch_one_art(net)) continue;

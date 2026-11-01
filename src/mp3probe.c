@@ -40,6 +40,23 @@ int mp3_parse_first_frame(const uint8_t *b, size_t len, mp3info_t *o) {
             if ((flags & 2) && q + 4 <= len) { o->xing_bytes = be32(b + q); q += 4; }
             if (vbr && (flags & 4) && q + 100 <= len) { memcpy(o->toc, b + q, 100); o->has_toc = 1; }
         }
+        /* The real byte rate: walk the frames we have. Some encoders under-pad,
+         * so a "56 kbps" file can really run 55.7 (15 s off an hour in). More
+         * than two bitrates means VBR; then only the table or the average help. */
+        {
+            size_t p = i; int n = 0, nrates = 0, seen[16] = {0}; int64_t bytes = 0;
+            while (p + 4 <= len) {
+                if (b[p] != 0xFF || (b[p + 1] & 0xE0) != 0xE0 || ((b[p + 1] >> 3) & 3) != ver) break;
+                int fb = b[p + 2] >> 4;
+                if (fb == 0 || fb == 15 || ((b[p + 2] >> 2) & 3) != sri) break;
+                size_t flen = (size_t)((mpeg1 ? 144000 : 72000) * k_br[mpeg1 ? 0 : 1][fb] / o->srate) + ((b[p + 2] >> 1) & 1);
+                if (p + flen > len) break;
+                if (!seen[fb]++) nrates++;
+                n++; bytes += (int64_t)flen; p += flen;
+            }
+            if (n >= 30 && nrates <= 2)
+                o->byte_rate = (double)bytes * o->srate / ((double)n * o->samples_per_frame);
+        }
         o->ok = o->bitrate_kbps > 0;
         return o->ok;
     }
@@ -59,6 +76,12 @@ int64_t mp3_byte_for_ms(const mp3info_t *i, int64_t ms) {
         double x = fa + (fb - fa) * (pct - a);
         return i->audio_start + (int64_t)(x / 256.0 * audio_bytes);
     }
-    /* CBR (or VBR without a table: the first frame's bitrate is the best guess) */
+    if (i->frames > 0 && i->srate > 0 && audio_bytes > 0) {
+        /* a Xing/Info header without a table: its frame count gives the true average */
+        double dur_ms = (double)i->frames * i->samples_per_frame * 1000.0 / i->srate;
+        return i->audio_start + (int64_t)((double)ms / dur_ms * audio_bytes);
+    }
+    /* CBR: the measured byte rate, else the first frame's bitrate */
+    if (i->byte_rate > 0) return i->audio_start + (int64_t)(ms * i->byte_rate / 1000.0);
     return i->audio_start + ms * i->bitrate_kbps / 8;   /* kbps * ms / 8 = bytes */
 }
