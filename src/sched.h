@@ -11,7 +11,7 @@ typedef struct {
     double gain_db;
     int bulletin;
     const char *placement;      /* bulletins: placementId, the break's key in the slot list */
-    const char *b_url, *b_link; /* the baked audioUrl / episodeUrl (slots.c swaps url/link) */
+    const char *b_url, *b_link, *b_image; /* the baked audioUrl / episodeUrl / imageUrl (slots.c swaps them) */
 } ep_t;
 
 typedef struct {

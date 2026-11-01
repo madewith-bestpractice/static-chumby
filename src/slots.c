@@ -106,6 +106,7 @@ int slots_add(slotlist_t *l, char *text) {
         s->bulletin_id = nonempty(e, "bulletin_id");
         s->audio = nonempty(e, "audio_url");
         s->link = nonempty(e, "link_url");
+        s->image = nonempty(e, "image_url");
     }
     snprintf(l->dates[l->nt], sizeof l->dates[0], "%s", date);
     l->text[l->nt] = text;
@@ -154,11 +155,15 @@ int slots_apply(sched_t *s, const slotlist_t *l, int64_t now) {
             int content = sl && sl->kind != SLOT_BAKED && sl->bulletin_id && sl->audio;
             const char *want_url = content ? sl->audio : ep->b_url;
             const char *want_link = content ? (sl->link ? sl->link : ep->b_link) : ep->b_link;
-            if (!strcmp(ep->url, want_url) && !strcmp(ep->link, want_link)) continue;
+            /* the slot's cover (pre-baked riso art keyed on this exact URL) */
+            const char *want_image = content ? (sl->image ? sl->image : ep->b_image) : ep->b_image;
+            if (!strcmp(ep->url, want_url) && !strcmp(ep->link, want_link) && !strcmp(ep->image, want_image)) continue;
             if (want_url == ep->b_url) ep->url = ep->b_url;
             else { char *u = strdup(want_url); sched_keep(s, u); ep->url = u; }
             if (want_link == ep->b_link) ep->link = ep->b_link;
             else { char *u = strdup(want_link); sched_keep(s, u); ep->link = u; }
+            if (want_image == ep->b_image) ep->image = ep->b_image;
+            else { char *u = strdup(want_image); sched_keep(s, u); ep->image = u; }
             LOG("slots: %s %s -> %s", st->id, ep->placement, content ? sl->bulletin_id : "baked");
             changed++;
         }

@@ -168,6 +168,7 @@ sched_t *sched_parse(char *text) {
             ep->placement = json_str(e, "placementId", NULL);
             ep->b_url = ep->url;
             ep->b_link = ep->link;
+            ep->b_image = ep->image;
             st->sum_ms += (int64_t)dur * 1000;
         }
         if (st->n == 0 || st->loop_s <= 0) { free(st->eps); continue; }

@@ -4,7 +4,7 @@
  * every listener on a station hears the same bulletin. The rule (same as the
  * phones, mobile_app/lib/audio/bulletin_slots.dart):
  *  - follow the list: a `paid` or `house` entry with content replaces the
- *    baked break's audio (and link);
+ *    baked break's audio, link and cover;
  *  - no list, no entry, `baked`, an unknown kind: play the baked break;
  *  - never swap a break that is on the air (or about to be).
  * Breaks are matched on (station, placementId); the date is the US Central
@@ -24,7 +24,7 @@ typedef struct {
     const char *placement;
     int64_t at_ms;            /* play_at_utc */
     int kind;
-    const char *bulletin_id, *audio, *link;
+    const char *bulletin_id, *audio, *link, *image;
 } slot_t;
 
 typedef struct {
